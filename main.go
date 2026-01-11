@@ -31,7 +31,7 @@ func main() {
 
 	contentType := strings.Split(*url, "/")[3]
 	contentId := strings.Split(*url, "/")[4]
-	if len(contentId) != 9 && len(contentId) != 13 {
+	if len(contentId) != 9 && len(contentId) != 14 {
 		print("Invalid URL format, please paste a link like this: https://www.crunchyroll.com/watch/GWDU82Z05/water-hashira-giyu-tomiokas-pain\n")
 		os.Exit(1)
 	}
