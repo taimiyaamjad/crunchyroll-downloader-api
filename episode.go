@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 )
 
 type Episode struct {
@@ -105,8 +104,8 @@ func getEpisodeInfo(id string) EpisodeInfo {
 }
 
 // deleteStream removes the stream to make Crunchyroll think we "left" the playback
-func deleteStream(contentId, token string) bool {
-	req, err := http.NewRequest(http.MethodDelete, fmt.Sprintf("https://www.crunchyroll.com/playback/v1/token/%s/%s", contentId, token), io.NopCloser(strings.NewReader("")))
+func deleteStream(contentId, sToken string) bool {
+	req, err := http.NewRequest(http.MethodDelete, fmt.Sprintf("https://www.crunchyroll.com/playback/v1/token/%s/%s", contentId, sToken), nil)
 	if err != nil {
 		panic(err)
 	}

@@ -32,6 +32,11 @@ func downloadPart(url string) {
 	if err != nil {
 		panic(err)
 	}
+	if resp.StatusCode != 200 {
+		// Retry downloading part
+		downloadPart(url)
+		return
+	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
@@ -42,10 +47,12 @@ func downloadPart(url string) {
 }
 
 func getFilename(set *mpd.AdaptationSet) string {
-	if set.MimeType == "video/mp4" {
-		return "temp_video.mp4"
-	} else if set.MimeType == "audio/mp4" {
-		return "temp_audio.mp3"
+	for _, representation := range set.Representations {
+		if representation.Height != nil {
+			return "temp_video.mp4"
+		} else if representation.Bandwidth != nil {
+			return "temp_audio.mp3"
+		}
 	}
 	return ""
 }

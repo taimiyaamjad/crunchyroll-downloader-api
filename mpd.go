@@ -41,7 +41,7 @@ func getBaseUrl(set *mpd.AdaptationSet, isVideoSet bool, quality string) (*strin
 			}
 		} else {
 			toInt, _ := strconv.ParseInt(strings.ReplaceAll(quality, "k", ""), 10, 64)
-			if *representation.Bandwidth == uint64(toInt*1000) {
+			if (*representation.Bandwidth - 1) == uint64(toInt*1000) {
 				return &representation.BaseURL[0].Value, representation.ID
 			}
 		}

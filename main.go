@@ -80,13 +80,17 @@ func main() {
 	// Download video
 	baseUrl, representationId := getBaseUrl(videoSet, true, *videoQuality)
 	if baseUrl == nil {
-		print("Failed to get the video base URL, maybe the quality you entered is wrong?\n")
+		print("Failed to get the video base URL, maybe the video quality you entered is wrong?\n")
 		os.Exit(1)
 	}
 	downloadParts(baseUrl, representationId, videoSet)
 
 	// Download audio
 	audioBaseUrl, audioRepresentationId := getBaseUrl(audioSet, false, *audioQuality)
+	if audioBaseUrl == nil {
+		print("Failed to get the audio base URL, maybe the audio quality you entered is wrong?\n")
+		os.Exit(1)
+	}
 	downloadParts(audioBaseUrl, audioRepresentationId, audioSet)
 
 	if success := deleteStream(contentId, episode.Token); !success {
