@@ -7,15 +7,16 @@ import (
 )
 
 // mergeEverything merges audio, video and subtitles in a single MKV container
-func mergeEverything(subtitlesLang *string, info EpisodeInfo) {
+func mergeEverything(videoFile, audioFile, subsFile, outputFile string, subtitlesLang *string, info EpisodeInfo) {
 	args := []string{
-		"-i", "temp_video.mp4", "-i", "temp_audio.mp3",
+		"-i", videoFile,
+		"-i", audioFile,
 	}
 
-	if _, err := os.Stat("subs.ass"); err == nil {
+	if subsFile != "" {
 		args = append(args,
-			"-i", "subs.ass",
-			"-c:s", "copy", // keep subtitles as ASS
+			"-i", subsFile,
+			"-c:s", "copy",
 			"-metadata:s:s:0", fmt.Sprintf("title=%s", languageNames[*subtitlesLang]),
 		)
 	}
@@ -26,7 +27,7 @@ func mergeEverything(subtitlesLang *string, info EpisodeInfo) {
 		"-metadata:g", "show="+info.EpisodeMetadata.SeriesTitle,
 		"-metadata:g", "track="+fmt.Sprintf("%v", info.EpisodeMetadata.EpisodeNumber),
 		"-metadata:g", "season_number="+fmt.Sprintf("%v", info.EpisodeMetadata.EpisodeNumber),
-		"output.mkv",
+		outputFile,
 	)
 
 	cmd := exec.Command("ffmpeg", args...)
@@ -34,5 +35,10 @@ func mergeEverything(subtitlesLang *string, info EpisodeInfo) {
 		panic(err)
 	}
 
-	print("\nOutput file: output.mkv\n")
+	// Remove stuff
+	_ = os.Remove(videoFile)
+	_ = os.Remove(audioFile)
+	_ = os.Remove(subsFile)
+
+	fmt.Printf("\nDownload finished! Output file: %s\n\n", outputFile)
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 )
 
 type Episode struct {
@@ -47,7 +48,8 @@ func getEpisode(id string) Episode {
 		panic(err)
 	}
 	if episode.Error != nil {
-		panic(*episode.Error)
+		print("Error:", *episode.Error)
+		os.Exit(1)
 	}
 
 	return episode
@@ -111,7 +113,6 @@ func deleteStream(contentId, sToken string) bool {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64; rv:147.0) Gecko/20100101 Firefox/147.0")
-	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		panic(err)

@@ -4,10 +4,11 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"io"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/iyear/gowidevine"
 	"github.com/iyear/gowidevine/widevinepb"
@@ -36,10 +37,10 @@ type CrunchyrollWidevineLicenseResponse struct {
 	License string `json:"license"`
 }
 
-func sendChallenge(contentId, videoToken string, challenge []byte) []byte {
+func sendChallenge(contentId, videoToken string, challenge []byte) ([]byte, error) {
 	req, err := http.NewRequest(http.MethodPost, "https://www.crunchyroll.com/license/v1/license/widevine", io.NopCloser(bytes.NewReader(challenge)))
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("X-Cr-Content-Id", contentId)
@@ -50,58 +51,98 @@ func sendChallenge(contentId, videoToken string, challenge []byte) []byte {
 	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64; rv:147.0) Gecko/20100101 Firefox/147.0")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	// Parse JSON response
 	res, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
 	var result CrunchyrollWidevineLicenseResponse
-	if err := json.Unmarshal(res, &result); err != nil {
-		panic(fmt.Errorf("failed to get access token: %w", err))
+	if err = json.Unmarshal(res, &result); err != nil {
+		return nil, err
 	}
 
 	decoded, err := base64.StdEncoding.DecodeString(result.License)
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
 
-	return decoded
+	return decoded, nil
 }
 
-func getLicense(psshData, contentId, videoToken string) []*widevine.Key {
-	wvd, err := os.Open("./device.wvd")
-	if err != nil {
-		panic(err)
+func getWidevineDevice() (*widevine.Device, error) {
+	var clientID []byte
+	var privateKey []byte
+	files, _ := os.ReadDir(".")
+	for _, file := range files {
+		if strings.HasSuffix(file.Name(), ".wvd") {
+			wvd, err := os.Open(file.Name())
+			if err != nil {
+				return nil, err
+			}
+
+			return widevine.NewDevice(widevine.FromWVD(io.NopCloser(wvd)))
+		} else if file.Name() == "client_id.bin" {
+			f, err := os.Open("client_id.bin")
+			if err != nil {
+				return nil, err
+			}
+			defer f.Close()
+
+			clientID, err = io.ReadAll(f)
+		} else if file.Name() == "private_key.pem" {
+			f, err := os.Open("private_key.pem")
+			if err != nil {
+				return nil, err
+			}
+			defer f.Close()
+
+			privateKey, err = io.ReadAll(f)
+			break
+		}
 	}
 
-	var content []byte
-	wvd.Read(content)
-	device, err := widevine.NewDevice(widevine.FromWVD(io.NopCloser(wvd)))
-	if err != nil {
-		panic(err)
+	if len(clientID) > 0 && len(privateKey) > 0 {
+		return widevine.NewDevice(widevine.FromRaw(clientID, privateKey))
+	}
+
+	return nil, nil
+}
+
+func getLicense(psshData, contentId, videoToken string) error {
+	device, err := getWidevineDevice()
+	if device == nil {
+		return errors.New("no widevine device provided. You either need:\n- a \".wvd\" file,\n- or \"client_id.bin\" and \"private_key.pem\" files.\nI'm not sharing links for obvious reasons, but search \"ready to use cdms\" on Google :)\n")
+	} else if err != nil {
+		return err
 	}
 	cdm := widevine.NewCDM(device)
 	decodedPssh, err := base64.StdEncoding.DecodeString(psshData)
 	if err != nil {
-		panic(err)
+		return err
 	}
 	pssh, err := widevine.NewPSSH(decodedPssh)
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	challenge, parseLicense, err := cdm.GetLicenseChallenge(pssh, widevinepb.LicenseType_AUTOMATIC, false)
 	if err != nil {
-		panic(err)
+		return err
 	}
-	resp := sendChallenge(contentId, videoToken, challenge)
+	resp, err := sendChallenge(contentId, videoToken, challenge)
+	if err != nil {
+		return err
+	}
 	keys, err = parseLicense(resp)
 	if err != nil {
-		panic(err)
+		return err
 	}
 
-	return keys
+	return nil
 }
 
 func decryptPart(data []byte) ([]byte, error) {

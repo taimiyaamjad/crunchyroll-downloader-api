@@ -6,26 +6,23 @@ Downloads anime from Crunchyroll and outputs them in a MKV file.
 
 - Supports choosing the audio and subtitles language
 - Supports choosing the audio and video quality
-- Decrypts Widevine DRM (requires a .wvd file, which can't be provided here for legal reasons. Search on Google to create/get one)
+- Decrypts Widevine DRM (requires: a `.wvd` file or `client_id.bin` and `private_key.pem` files)
 - Adds metadata (like episode name) to the MKV container
+
+## Requirements
+
+- [FFmpeg](https://www.ffmpeg.org/download.html#get-packages)
+- To download Premium-only content, a Crunchyroll Premium account. No, this can't be bypassed and a free trial should be enough
+- Either a `.wvd` file, or a `client_id.bin` and `private_key.pem`
 
 ## Download
 
 Check the [latest release](https://github.com/CuteTenshii/crunchyroll-downloader/releases/latest) and download the file that corresponds to your OS.
 
-## Requirements
-
-- [Go](https://go.dev/dl/)
-- To download Premium-only content, a Crunchyroll Premium account. No, this can't be bypassed and a free trial should be enough
-- A `.wvd` file.
-
 ## Usage
 
-- Clone this repository
-- Open a Terminal/Command prompt, and go to the folder where you cloned the repo
-- Run `go build .`
-- Run the program with the executable built
-
+- Open a Terminal/Command prompt, and go to the folder where you downloaded the binary/cloned the repo
+- Run the program with the options you want:
 ```shell
 Usage of ./crunchyroll-downloader:
   -audio-lang string
@@ -42,6 +39,18 @@ Usage of ./crunchyroll-downloader:
         Video quality (default "1080p")
 ```
 
+## Building
+
+### Requirements
+
+- [Go](https://go.dev/dl/)
+
+### Guide
+
+- Clone this repository
+- Open a Terminal/Command prompt, and go to the folder where you cloned the repo
+- Run `go build .`
+
 ## Help
 
 ### How do I get my `etp_rt` cookie?
@@ -56,3 +65,5 @@ Usage of ./crunchyroll-downloader:
 ### What is a `.wvd` file and do I really need one?
 
 Yes, Crunchyroll uses DRM-only content. This file is used to get a Widevine license, which gives the keys to decrypt the media.
+
+If you don't have a rooted Android device or are just lazy, search "ready to use cdms" and you'll find plenty of websites providing those files.
