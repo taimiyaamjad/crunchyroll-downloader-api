@@ -13,9 +13,9 @@ import (
 func buildUrl(base, representationId, file string, partNum *int64) string {
 	if partNum != nil {
 		// $Number%05d$
-		file = strings.ReplaceAll(file, "$Number%05d$", fmt.Sprintf("%05d", *partNum))
+		file = strings.ReplaceAll(file, "$Number$", fmt.Sprintf("%05d", *partNum))
 	}
-	return strings.ReplaceAll(file, "$RepresentationID$", base+representationId)
+	return base + strings.ReplaceAll(file, "$RepresentationID$", representationId)
 }
 
 var parts []byte
@@ -43,9 +43,9 @@ func downloadPart(url string) {
 
 func getFilename(set *mpd.AdaptationSet) string {
 	if set.MimeType == "video/mp4" {
-		return "video.mp4"
+		return "temp_video.mp4"
 	} else if set.MimeType == "audio/mp4" {
-		return "audio.mp3"
+		return "temp_audio.mp3"
 	}
 	return ""
 }

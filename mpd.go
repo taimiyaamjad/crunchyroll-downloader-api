@@ -3,6 +3,7 @@ package main
 import (
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/unki2aut/go-mpd"
@@ -31,15 +32,18 @@ func parseManifest(url string) *mpd.MPD {
 	return mpd
 }
 
-func getBaseUrl(manifest *mpd.MPD, mimeType, quality string) (*string, *string) {
-	set := findSet(manifest.Period[0].AdaptationSets, mimeType)
-	if set == nil {
-		return nil, nil
-	}
+func getBaseUrl(set *mpd.AdaptationSet, isVideoSet bool, quality string) (*string, *string) {
 	for _, representation := range set.Representations {
-		// ID is something like "video/avc1/1080p-1747708204"
-		if strings.Contains(*representation.ID, quality) {
-			return &representation.BaseURL[0].Value, representation.ID
+		if isVideoSet {
+			toInt, _ := strconv.ParseInt(strings.ReplaceAll(quality, "p", ""), 10, 64)
+			if *representation.Height == uint64(toInt) {
+				return &representation.BaseURL[0].Value, representation.ID
+			}
+		} else {
+			toInt, _ := strconv.ParseInt(strings.ReplaceAll(quality, "k", ""), 10, 64)
+			if *representation.Bandwidth == uint64(toInt*1000) {
+				return &representation.BaseURL[0].Value, representation.ID
+			}
 		}
 	}
 	return nil, nil

@@ -13,7 +13,7 @@ var token = ""
 
 func main() {
 	url := flag.String("url", "", "URL of the episode/season to download")
-	audioLang := flag.String("audio-lang", "jp-JP", "Audio language")
+	audioLang := flag.String("audio-lang", "ja-JP", "Audio language")
 	subtitlesLang := flag.String("subtitles-lang", "en-US", "Subtitles language")
 	videoQuality := flag.String("video-quality", "1080p", "Video quality")
 	audioQuality := flag.String("audio-quality", "192k", "Audio quality")
@@ -47,22 +47,24 @@ func main() {
 		correctGuidI := slices.IndexFunc(info.EpisodeMetadata.Versions, func(v *DubVersion) bool {
 			return v.AudioLocale == *audioLang
 		})
-		correctGuid := info.EpisodeMetadata.Versions[correctGuidI]
-		if correctGuid == nil {
-			log.Println("Invalid audio locale. Please put the locale in the \"ja-JP\", \"en-US\"... format.")
+
+		if correctGuidI == -1 {
+			print("! Invalid audio locale. Please put the locale in the \"ja-JP\", \"en-US\"... format.\n")
 			os.Exit(1)
 		}
+		correctGuid := info.EpisodeMetadata.Versions[correctGuidI]
 		contentId = (*correctGuid).GUID
 	}
 	episode := getEpisode(contentId)
+	fmt.Printf("Downloading: %s (E%02vS%02v) from %s\n", info.Title, info.EpisodeMetadata.EpisodeNumber, info.EpisodeMetadata.SeasonNumber, info.EpisodeMetadata.SeriesTitle)
 
 	manifest := parseManifest(episode.ManifestURL)
 	pssh := getPssh(manifest)
 	if pssh == nil {
 		panic("PSSH not found")
 	}
-	videoSet := findSet(manifest.Period[0].AdaptationSets, "video/mp4")
-	audioSet := findSet(manifest.Period[0].AdaptationSets, "audio/mp4")
+	videoSet := manifest.Period[0].AdaptationSets[0]
+	audioSet := manifest.Period[0].AdaptationSets[1]
 
 	// Get Widevine license
 	getLicense(*pssh, contentId, episode.Token)
@@ -70,18 +72,26 @@ func main() {
 	// Download subtitles
 	subtitles := episode.Subtitles[*subtitlesLang]
 	if subtitles != nil {
-		fmt.Printf("Downloading subtitles for language: %s...", languageNames[*subtitlesLang])
+		fmt.Printf("Downloading subtitles for %s language...\n", languageNames[*subtitlesLang])
 		downloadSubs(subtitles.URL)
 		fmt.Println("Downloaded subtitles!")
 	}
 
 	// Download video
-	baseUrl, representationId := getBaseUrl(manifest, "video/mp4", *videoQuality)
+	baseUrl, representationId := getBaseUrl(videoSet, true, *videoQuality)
+	if baseUrl == nil {
+		print("Failed to get the video base URL, maybe the quality you entered is wrong?\n")
+		os.Exit(1)
+	}
 	downloadParts(baseUrl, representationId, videoSet)
 
 	// Download audio
-	audioBaseUrl, audioRepresentationId := getBaseUrl(manifest, "audio/mp4", *audioQuality)
+	audioBaseUrl, audioRepresentationId := getBaseUrl(audioSet, false, *audioQuality)
 	downloadParts(audioBaseUrl, audioRepresentationId, audioSet)
+
+	if success := deleteStream(contentId, episode.Token); !success {
+		print("Failed to remove the player stream, you will probably have issues downloading other episodes.\n")
+	}
 
 	mergeEverything(subtitlesLang, info)
 }

@@ -16,18 +16,9 @@ import (
 
 var keys []*widevine.Key
 
-func findSet(sets []*mpd.AdaptationSet, mimeType string) *mpd.AdaptationSet {
-	for _, set := range sets {
-		if set.MimeType == mimeType {
-			return set
-		}
-	}
-	return nil
-}
-
 // getPssh finds the PSSH in the MPD manifest
 func getPssh(mpd *mpd.MPD) *string {
-	set := findSet(mpd.Period[0].AdaptationSets, "video/mp4")
+	set := mpd.Period[0].AdaptationSets[0]
 	if set == nil {
 		return nil
 	}

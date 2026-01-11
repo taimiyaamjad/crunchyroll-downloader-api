@@ -29,7 +29,7 @@ Check the [latest release](https://github.com/CuteTenshii/crunchyroll-downloader
 ```shell
 Usage of ./crunchyroll-downloader:
   -audio-lang string
-        Audio language (default "jp-JP")
+        Audio language (default "ja-JP")
   -audio-quality string
         Audio quality (default "192k")
   -etp-rt string
