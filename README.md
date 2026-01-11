@@ -31,12 +31,24 @@ Usage of ./crunchyroll-downloader:
         Audio quality (default "192k")
   -etp-rt string
         The "etp_rt" cookie value of your account
-  -subtitles-lang string
+  -season int
+        Season number. Not used if an episode link is entered
+  -subs-lang string
         Subtitles language (default "en-US")
   -url string
         URL of the episode/season to download
   -video-quality string
         Video quality (default "1080p")
+```
+
+Ex: to download the first season of *Hell's Paradise*:
+```shell
+./crunchyroll-downloader --url https://www.crunchyroll.com/series/GJ0H7Q5ZJ/hells-paradise --season 1 --etp-rt replace_this
+```
+
+To download a specific episode:
+```shell
+./crunchyroll-downloader --url https://www.crunchyroll.com/watch/GE00198973JAJP/dawn-and-confusion --etp-rt replace_this
 ```
 
 ## Building
