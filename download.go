@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"strings"
 
+	widevine "github.com/iyear/gowidevine"
 	"github.com/unki2aut/go-mpd"
 )
 
@@ -20,10 +22,10 @@ func buildUrl(base, representationId, file string, partNum *int64) string {
 
 var parts []byte
 
-func downloadPart(url string) {
+func downloadPart(url string) error {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
-		panic(err)
+		return err
 	}
 	req.Header.Set("Origin", "https://static.crunchyroll.com")
 	req.Header.Set("Referer", "https://static.crunchyroll.com/")
@@ -34,16 +36,17 @@ func downloadPart(url string) {
 	}
 	if resp.StatusCode != 200 {
 		// Retry downloading part
-		downloadPart(url)
-		return
+		return downloadPart(url)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		panic(err)
+		return err
 	}
 	parts = append(parts, body...)
+
+	return nil
 }
 
 func getFilename(set *mpd.AdaptationSet) string {
@@ -63,14 +66,18 @@ func getFilename(set *mpd.AdaptationSet) string {
 	return ""
 }
 
-func downloadParts(baseUrl, representationId *string, set *mpd.AdaptationSet) string {
+func downloadParts(baseUrl, representationId *string, set *mpd.AdaptationSet) (string, error) {
 	initUrl := buildUrl(*baseUrl, *representationId, *set.SegmentTemplate.Initialization, nil)
-	downloadPart(initUrl)
+	if err := downloadPart(initUrl); err != nil {
+		return "", err
+	}
 
 	timeline := expandTimeline(set.SegmentTemplate.SegmentTimeline.S, 1)
 	for i, item := range timeline {
 		url := buildUrl(*baseUrl, *representationId, *set.SegmentTemplate.Media, &item)
-		downloadPart(url)
+		if err := downloadPart(url); err != nil {
+			return "", err
+		}
 		fmt.Printf("\rDownloaded %v of %v segments (%v%%)", i+1, len(timeline), (100*(i+1))/len(timeline))
 	}
 
@@ -80,19 +87,17 @@ func downloadParts(baseUrl, representationId *string, set *mpd.AdaptationSet) st
 	filename := getFilename(set)
 	file, err := os.Create(filename)
 	if err != nil {
-		panic(err)
-	}
-	decrypted, err := decryptPart(parts)
-	if err != nil {
-		panic(err)
+		return "", err
 	}
 	defer file.Close()
-	file.Write(decrypted)
+	if err = widevine.DecryptMP4Auto(io.NopCloser(bytes.NewReader(parts)), keys, file); err != nil {
+		return "", fmt.Errorf("widevine.DecryptMP4Auto: %w", err)
+	}
 
-	// Empty parts
-	parts = []byte{}
+	// Clear parts to free up ram
+	parts = nil
 
-	return filename
+	return filename, nil
 }
 
 func downloadSubs(url string) string {
@@ -127,6 +132,22 @@ func downloadSubs(url string) string {
 }
 
 func downloadEpisode(contentId string, videoQuality, audioQuality, subtitlesLang *string, info EpisodeInfo) {
+	renamed := strings.ReplaceAll(info.EpisodeMetadata.SeriesTitle, "'", "_")
+	renamed = strings.ReplaceAll(renamed, "/", "_")
+	renamed = strings.ReplaceAll(renamed, ":", "_")
+	if _, err := os.Stat(renamed); err != nil {
+		_ = os.MkdirAll(renamed, 0777)
+	}
+	outputFile := fmt.Sprintf("%s/%s S%02vE%02v [%s].mkv",
+		renamed, info.EpisodeMetadata.SeriesTitle, info.EpisodeMetadata.SeasonNumber, info.EpisodeMetadata.EpisodeNumber,
+		*videoQuality,
+	)
+
+	if _, err := os.Stat(outputFile); err == nil {
+		fmt.Printf("Episode %v is already downloaded, skipping...\n", info.EpisodeMetadata.EpisodeNumber)
+		return
+	}
+
 	episode := getEpisode(contentId)
 	fmt.Printf("Downloading: %s (S%02vE%02v) from %s\n", info.Title, info.EpisodeMetadata.SeasonNumber, info.EpisodeMetadata.EpisodeNumber, info.EpisodeMetadata.SeriesTitle)
 
@@ -160,7 +181,10 @@ func downloadEpisode(contentId string, videoQuality, audioQuality, subtitlesLang
 		print("Failed to get the video base URL, maybe the video quality you entered is wrong?\n")
 		os.Exit(1)
 	}
-	videoFile := downloadParts(baseUrl, representationId, videoSet)
+	videoFile, err := downloadParts(baseUrl, representationId, videoSet)
+	if err != nil {
+		panic(err)
+	}
 
 	// Download audio
 	audioBaseUrl, audioRepresentationId := getBaseUrl(audioSet, false, *audioQuality)
@@ -168,22 +192,15 @@ func downloadEpisode(contentId string, videoQuality, audioQuality, subtitlesLang
 		print("Failed to get the audio base URL, maybe the audio quality you entered is wrong?\n")
 		os.Exit(1)
 	}
-	audioFile := downloadParts(audioBaseUrl, audioRepresentationId, audioSet)
+	audioFile, err := downloadParts(audioBaseUrl, audioRepresentationId, audioSet)
+	if err != nil {
+		panic(err)
+	}
 
 	if success := deleteStream(contentId, episode.Token); !success {
 		print("Failed to remove the player stream, you will probably have issues downloading other episodes.\n")
 	}
 
-	renamed := strings.ReplaceAll(info.EpisodeMetadata.SeriesTitle, "'", "_")
-	renamed = strings.ReplaceAll(renamed, "/", "_")
-	renamed = strings.ReplaceAll(renamed, ":", "_")
-	if _, err := os.Stat(renamed); err != nil {
-		_ = os.MkdirAll(renamed, 0777)
-	}
-	outputFile := fmt.Sprintf("%s/%s S%02vE%02v [%s].mkv",
-		renamed, info.EpisodeMetadata.SeriesTitle, info.EpisodeMetadata.SeasonNumber, info.EpisodeMetadata.EpisodeNumber,
-		*videoQuality,
-	)
 	mergeEverything(videoFile, audioFile, subsFile, outputFile, subtitlesLang, info)
 }
 

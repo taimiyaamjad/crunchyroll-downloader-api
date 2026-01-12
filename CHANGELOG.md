@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.1
+
+- Optimized code, tried to handle errors
+- Some random fixes
+- Added a way to automatically refetch an access token if the current one expires
+
 ## 1.1.0
 
 - Added support for downloading entire seasons

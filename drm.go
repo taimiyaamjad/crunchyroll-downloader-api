@@ -49,7 +49,7 @@ func sendChallenge(contentId, videoToken string, challenge []byte) ([]byte, erro
 	req.Header.Set("Origin", "https://static.crunchyroll.com")
 	req.Header.Set("Referer", "https://static.crunchyroll.com/")
 	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64; rv:147.0) Gecko/20100101 Firefox/147.0")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := DoRequest(req)
 	if err != nil {
 		return nil, err
 	}
@@ -143,11 +143,4 @@ func getLicense(psshData, contentId, videoToken string) error {
 	}
 
 	return nil
-}
-
-func decryptPart(data []byte) ([]byte, error) {
-	var res bytes.Buffer
-	err := widevine.DecryptMP4Auto(io.NopCloser(bytes.NewReader(data)), keys, &res)
-
-	return res.Bytes(), err
 }

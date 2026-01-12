@@ -8,16 +8,18 @@ import (
 	"strings"
 )
 
-var token = ""
+var (
+	token         = ""
+	audioLang     = flag.String("audio-lang", "ja-JP", "Audio language")
+	subtitlesLang = flag.String("subs-lang", "en-US", "Subtitles language")
+	videoQuality  = flag.String("video-quality", "1080p", "Video quality")
+	audioQuality  = flag.String("audio-quality", "192k", "Audio quality")
+	seasonNumber  = flag.Int("season", 0, "Season number. Not used if an episode link is entered")
+	etpRt         = flag.String("etp-rt", "", "The \"etp_rt\" cookie value of your account")
+)
 
 func main() {
 	url := flag.String("url", "", "URL of the episode/season to download")
-	audioLang := flag.String("audio-lang", "ja-JP", "Audio language")
-	subtitlesLang := flag.String("subs-lang", "en-US", "Subtitles language")
-	videoQuality := flag.String("video-quality", "1080p", "Video quality")
-	audioQuality := flag.String("audio-quality", "192k", "Audio quality")
-	seasonNumber := flag.Int("season", 0, "Season number. Not used if an episode link is entered")
-	etpRt := flag.String("etp-rt", "", "The \"etp_rt\" cookie value of your account")
 	flag.Parse()
 
 	if *url == "" {
@@ -41,7 +43,7 @@ func main() {
 	}
 
 	// Fetch Crunchyroll access token
-	token = getAccessToken(*etpRt)
+	token = GetAccessToken(*etpRt)
 
 	// Episode link
 	if contentType == "watch" {

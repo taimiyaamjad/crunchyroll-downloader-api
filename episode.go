@@ -33,7 +33,7 @@ func getEpisode(id string) Episode {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64; rv:147.0) Gecko/20100101 Firefox/147.0")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := DoRequest(req)
 	if err != nil {
 		panic(err)
 	}
@@ -87,7 +87,7 @@ func getEpisodeInfo(id string) EpisodeInfo {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64; rv:147.0) Gecko/20100101 Firefox/147.0")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := DoRequest(req)
 	if err != nil {
 		panic(err)
 	}
@@ -113,7 +113,7 @@ func deleteStream(contentId, sToken string) bool {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64; rv:147.0) Gecko/20100101 Firefox/147.0")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := DoRequest(req)
 	if err != nil {
 		panic(err)
 	}

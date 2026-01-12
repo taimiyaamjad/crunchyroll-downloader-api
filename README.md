@@ -2,6 +2,8 @@
 
 Downloads anime from Crunchyroll and outputs them in a MKV file.
 
+You won't be banned or anything, I downloaded all Kaguya-Sama seasons to test during 30 mins and everything went fine
+
 ## Features
 
 - Supports choosing the audio and subtitles language

@@ -17,8 +17,8 @@ type CrunchyrollTokenResponse struct {
 	AccessToken string `json:"access_token"`
 }
 
-// getAccessToken fetches an access token from Crunchyroll
-func getAccessToken(etpRt string) string {
+// GetAccessToken fetches an access token from Crunchyroll
+func GetAccessToken(etpRt string) string {
 	body := url.Values{}
 	body.Set("device_id", deviceId)
 	body.Set("device_type", "Firefox on Linux")

@@ -45,8 +45,14 @@ func getBaseUrl(set *mpd.AdaptationSet, isVideoSet bool, quality string) (*strin
 					return &representation.BaseURL[0].Value, representation.ID
 				}
 			} else if representation.Bandwidth != nil {
-				toInt, _ := strconv.ParseInt(strings.ReplaceAll(quality, "k", ""), 10, 64)
-				if (*representation.Bandwidth - 1) == uint64(toInt*1000) {
+				num := strings.ReplaceAll(quality, "k", "")
+
+				// Crunchyroll MPDs are weird on the "bandwidth" value, it can be 192002 (not just 192000) on certain manifests
+				if num == "192" && *representation.Bandwidth >= 192000 {
+					return &representation.BaseURL[0].Value, representation.ID
+				} else if num == "128" && *representation.Bandwidth >= 128000 {
+					return &representation.BaseURL[0].Value, representation.ID
+				} else if num == "96" && *representation.Bandwidth >= 96000 {
 					return &representation.BaseURL[0].Value, representation.ID
 				}
 			}
