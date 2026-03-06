@@ -186,14 +186,26 @@ func downloadSubs(url string) string {
 }
 
 func downloadEpisode(contentId string, videoQuality, audioQuality, subtitlesLang *string, info EpisodeInfo) {
-	renamed := strings.ReplaceAll(info.EpisodeMetadata.SeriesTitle, "'", "_")
-	renamed = strings.ReplaceAll(renamed, "/", "_")
-	renamed = strings.ReplaceAll(renamed, ":", "_")
-	if _, err := os.Stat(renamed); err != nil {
-		_ = os.MkdirAll(renamed, 0777)
+	sanitize := func(s string) string {
+		illegal := []string{"\\", "/", ":", "*", "?", "\"", "<", ">", "|"}
+		res := s
+		for _, char := range illegal {
+			res = strings.ReplaceAll(res, char, "_")
+		}
+		return strings.TrimRight(res, " .")
 	}
+
+	cleanSeriesTitle := sanitize(info.EpisodeMetadata.SeriesTitle)
+
+	if _, err := os.Stat(cleanSeriesTitle); err != nil {
+		_ = os.MkdirAll(cleanSeriesTitle, 0777)
+	}
+
 	outputFile := fmt.Sprintf("%s/%s S%02vE%02v [%s].mkv",
-		renamed, info.EpisodeMetadata.SeriesTitle, info.EpisodeMetadata.SeasonNumber, info.EpisodeMetadata.EpisodeNumber,
+		cleanSeriesTitle,
+		cleanSeriesTitle,
+		info.EpisodeMetadata.SeasonNumber, 
+		info.EpisodeMetadata.EpisodeNumber,
 		*videoQuality,
 	)
 
