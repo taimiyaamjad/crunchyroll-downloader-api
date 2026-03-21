@@ -42,7 +42,7 @@ Usage of ./crunchyroll-downloader:
         Subtitles language (default "en-US")
   -url string
         URL of the episode/season to download
-  -urls string
+  -file string
         Path to a text file with one URL per line
   -video-quality string
         Video quality (default "1080p")
