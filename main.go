@@ -17,7 +17,7 @@ var (
 	audioQuality  = flag.String("audio-quality", "192k", "Audio quality")
 	seasonNumber  = flag.Int("season", 0, "Season number. Not used if an episode link is entered")
 	etpRt         = flag.String("etp-rt", "", "The \"etp_rt\" cookie value of your account")
-	debug         = flag.Bool("debug", false, "Log debug information")
+	debug         = flag.Bool("debug-manifest", false, "Log raw episode playback JSON and manifest XML")
 )
 
 func processUrl(url string) {
