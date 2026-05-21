@@ -63,7 +63,12 @@ func getBaseUrl(set *mpd.AdaptationSet, isVideoSet bool, quality string) (*strin
 			}
 		}
 	}
-	return nil, nil
+	if len(set.Representations) == 0 {
+		return nil, nil
+	}
+	firstRep := set.Representations[0]
+	fmt.Printf("Audio quality %s not found, deferring to %s\n", quality, *firstRep.ID)
+	return &firstRep.BaseURL[0].Value, firstRep.ID
 }
 
 func expandTimeline(timeline []*mpd.SegmentTimelineS, startNumber int64) []int64 {
