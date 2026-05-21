@@ -209,6 +209,15 @@ func downloadEpisode(contentId string, videoQuality, audioQuality, subtitlesLang
 		*videoQuality,
 	)
 
+	defer func() {
+		print("Cleaning up...")
+
+		if r := recover(); r != nil {
+			deleteStream(contentId, token)
+			print("Recovered from error:", r)
+		}
+	}()
+
 	if _, err := os.Stat(outputFile); err == nil {
 		fmt.Printf("Episode %v is already downloaded, skipping...\n", info.EpisodeMetadata.EpisodeNumber)
 		return
@@ -228,6 +237,7 @@ func downloadEpisode(contentId string, videoQuality, audioQuality, subtitlesLang
 	err := getLicense(*pssh, contentId, episode.Token)
 	if err != nil {
 		fmt.Printf("Error: %s", err)
+		deleteStream(contentId, token)
 		os.Exit(1)
 	}
 
@@ -239,22 +249,24 @@ func downloadEpisode(contentId string, videoQuality, audioQuality, subtitlesLang
 		fmt.Println("Downloaded subtitles!")
 	}
 
-	baseUrl, representationId := getBaseUrl(videoSet, true, *videoQuality)
-	if baseUrl == nil {
-		print("Failed to get the video base URL, maybe the video quality you entered is wrong?\n")
+	audioBaseUrl, audioRepresentationId := getBaseUrl(audioSet, false, *audioQuality)
+	if audioBaseUrl == nil {
+		print("Failed to get the audio base URL, maybe the audio quality you entered is wrong?\n")
+		deleteStream(contentId, token)
 		os.Exit(1)
 	}
-	videoFile, err := downloadParts(baseUrl, representationId, videoSet)
+	audioFile, err := downloadParts(audioBaseUrl, audioRepresentationId, audioSet)
 	if err != nil {
 		panic(err)
 	}
 
-	audioBaseUrl, audioRepresentationId := getBaseUrl(audioSet, false, *audioQuality)
-	if audioBaseUrl == nil {
-		print("Failed to get the audio base URL, maybe the audio quality you entered is wrong?\n")
+	baseUrl, representationId := getBaseUrl(videoSet, true, *videoQuality)
+	if baseUrl == nil {
+		print("Failed to get the video base URL, maybe the video quality you entered is wrong?\n")
+		deleteStream(contentId, token)
 		os.Exit(1)
 	}
-	audioFile, err := downloadParts(audioBaseUrl, audioRepresentationId, audioSet)
+	videoFile, err := downloadParts(baseUrl, representationId, videoSet)
 	if err != nil {
 		panic(err)
 	}
