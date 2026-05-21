@@ -17,12 +17,13 @@ var (
 	audioQuality  = flag.String("audio-quality", "192k", "Audio quality")
 	seasonNumber  = flag.Int("season", 0, "Season number. Not used if an episode link is entered")
 	etpRt         = flag.String("etp-rt", "", "The \"etp_rt\" cookie value of your account")
+	debug         = flag.Bool("debug", false, "Log debug information")
 )
 
 func processUrl(url string) {
 	contentType := strings.Split(url, "/")[3]
 	contentId := strings.Split(url, "/")[4]
-	if len(contentId) != 9 && len(contentId) != 14 {
+	if len(contentId) < 9 && len(contentId) > 14 {
 		fmt.Printf("Invalid URL format: %s\n", url)
 		return
 	}

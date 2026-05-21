@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -28,6 +29,10 @@ func parseManifest(url string) *mpd.MPD {
 	}
 	mpd := new(mpd.MPD)
 	mpd.Decode(body)
+
+	if *debug {
+		fmt.Printf("\n%s\n", string(body))
+	}
 
 	return mpd
 }
