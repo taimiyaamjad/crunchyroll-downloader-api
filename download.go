@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -187,27 +188,36 @@ func downloadSubs(url string) string {
 
 func downloadEpisode(contentId string, videoQuality, audioQuality, subtitlesLang *string, info EpisodeInfo) {
 	sanitize := func(s string) string {
-		illegal := []string{"\\", "/", ":", "*", "?", "\"", "<", ">", "|"}
+		if s == "" {
+			return "Unknown"
+		}
+
+		// Characters that are illegal in Windows filenames or break the final path
+		illegal := []string{"\\", "/", ":", "*", "?", "\"", "<", ">", "|", "'", "’", "`", "“", "”"}
 		res := s
 		for _, char := range illegal {
 			res = strings.ReplaceAll(res, char, "_")
+		}
+		for strings.Contains(res, "__") {
+			res = strings.ReplaceAll(res, "__", "_")
 		}
 		return strings.TrimRight(res, " .")
 	}
 
 	cleanSeriesTitle := sanitize(info.EpisodeMetadata.SeriesTitle)
+	cleanEpisodeTitle := sanitize(info.Title)
 
 	if _, err := os.Stat(cleanSeriesTitle); err != nil {
 		_ = os.MkdirAll(cleanSeriesTitle, 0777)
 	}
 
-	outputFile := fmt.Sprintf("%s/%s S%02vE%02v [%s].mkv",
-		cleanSeriesTitle,
+	outputFile := filepath.Join(cleanSeriesTitle, fmt.Sprintf("%s S%02dE%02d - %s [%s].mkv",
 		cleanSeriesTitle,
 		info.EpisodeMetadata.SeasonNumber,
 		info.EpisodeMetadata.EpisodeNumber,
+		cleanEpisodeTitle,
 		*videoQuality,
-	)
+	))
 
 	defer func() {
 		print("Cleaning up...")
