@@ -91,3 +91,7 @@ To batch download from a file (one URL per line):
 Yes, Crunchyroll uses DRM-only content. This file is used to get a Widevine license, which gives the keys to decrypt the media.
 
 If you don't have a rooted Android device or are just lazy, search "ready to use cdms" and you'll find plenty of websites providing those files.
+
+## License
+
+This project is licensed under the MIT License. See [LICENSE.txt](LICENSE.txt)
