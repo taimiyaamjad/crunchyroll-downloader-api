@@ -186,7 +186,7 @@ func downloadSubs(url string) string {
 	return filename
 }
 
-func downloadEpisode(contentId string, videoQuality, audioQuality, subtitlesLang *string, info EpisodeInfo) {
+func downloadEpisode(baseContentId string, info EpisodeInfo, audioLangs, subsLangs []string, videoQuality, audioQuality *string) {
 	sanitize := func(s string) string {
 		if s == "" {
 			return "Unknown"
@@ -219,76 +219,131 @@ func downloadEpisode(contentId string, videoQuality, audioQuality, subtitlesLang
 		*videoQuality,
 	))
 
-	defer func() {
-		print("Cleaning up...")
-
-		if r := recover(); r != nil {
-			deleteStream(contentId, token)
-			print("Recovered from error:", r)
-		}
-	}()
-
 	if _, err := os.Stat(outputFile); err == nil {
 		fmt.Printf("Episode %v is already downloaded, skipping...\n", info.EpisodeMetadata.EpisodeNumber)
 		return
 	}
 
-	episode := getEpisode(contentId)
+	// Resolve each requested audio locale to its version GUID. Each dub is a
+	// separate playback stream with its own manifest, token and Widevine keys.
+	guidByLocale := map[string]string{}
+	if info.EpisodeMetadata.AudioLocale != "" {
+		guidByLocale[info.EpisodeMetadata.AudioLocale] = baseContentId
+	}
+	for _, v := range info.EpisodeMetadata.Versions {
+		guidByLocale[v.AudioLocale] = v.GUID
+	}
+
+	type audioVersion struct {
+		locale    string
+		contentId string
+	}
+	var versions []audioVersion
+	for _, locale := range audioLangs {
+		guid, ok := guidByLocale[locale]
+		if !ok {
+			fmt.Printf("! Audio locale %s is not available for episode %v, aborting this episode.\n", locale, info.EpisodeMetadata.EpisodeNumber)
+			return
+		}
+		versions = append(versions, audioVersion{locale: locale, contentId: guid})
+	}
+
 	fmt.Printf("Downloading: %s (S%02vE%02v) from %s\n", info.Title, info.EpisodeMetadata.SeasonNumber, info.EpisodeMetadata.EpisodeNumber, info.EpisodeMetadata.SeriesTitle)
-	fmt.Printf("Downloading Audio Locale: %s\n", info.EpisodeMetadata.AudioLocale)
-	manifest := parseManifest(episode.ManifestURL)
-	pssh := getPssh(manifest)
-	if pssh == nil {
-		panic("PSSH not found")
-	}
-	videoSet := manifest.Period[0].AdaptationSets[0]
-	audioSet := manifest.Period[0].AdaptationSets[1]
+	fmt.Printf("Audio locales: %s | Subtitle locales: %s\n", strings.Join(audioLangs, ", "), strings.Join(subsLangs, ", "))
 
-	err := getLicense(*pssh, contentId, episode.Token)
-	if err != nil {
-		fmt.Printf("Error: %s", err)
-		deleteStream(contentId, token)
-		os.Exit(1)
+	// activeStreams tracks every playback token we open so we can release them
+	// all if anything fails partway through.
+	activeStreams := map[string]string{}
+	defer func() {
+		print("Cleaning up...")
+
+		for id, sToken := range activeStreams {
+			deleteStream(id, sToken)
+		}
+		if r := recover(); r != nil {
+			print("Recovered from error:", r)
+		}
+	}()
+
+	// Fetch the first version's playback first so we can validate subtitle
+	// availability before downloading anything heavy.
+	firstEpisode := getEpisode(versions[0].contentId)
+	activeStreams[versions[0].contentId] = firstEpisode.Token
+
+	for _, locale := range subsLangs {
+		if firstEpisode.Subtitles[locale] == nil {
+			fmt.Printf("! Subtitle locale %s is not available for episode %v, aborting this episode.\n", locale, info.EpisodeMetadata.EpisodeNumber)
+			return
+		}
 	}
 
-	subtitles := episode.Subtitles[*subtitlesLang]
-	var subsFile string
-	if subtitles != nil {
-		fmt.Printf("Downloading subtitles for %s language...\n", languageNames[*subtitlesLang])
-		subsFile = downloadSubs(subtitles.URL)
+	var subTracks []mediaTrack
+	for _, locale := range subsLangs {
+		fmt.Printf("Downloading subtitles for %s...\n", trackTitle(locale))
+		subTracks = append(subTracks, mediaTrack{file: downloadSubs(firstEpisode.Subtitles[locale].URL), locale: locale})
+	}
+	if len(subTracks) > 0 {
 		fmt.Println("Downloaded subtitles!")
 	}
 
-	audioBaseUrl, audioRepresentationId := getBaseUrl(audioSet, false, *audioQuality)
-	if audioBaseUrl == nil {
-		print("Failed to get the audio base URL, maybe the audio quality you entered is wrong?\n")
-		deleteStream(contentId, token)
-		os.Exit(1)
-	}
-	audioFile, err := downloadParts(audioBaseUrl, audioRepresentationId, audioSet)
-	if err != nil {
-		panic(err)
+	var videoFile string
+	var audioTracks []mediaTrack
+
+	for i, version := range versions {
+		episode := firstEpisode
+		if i > 0 {
+			episode = getEpisode(version.contentId)
+			activeStreams[version.contentId] = episode.Token
+		}
+
+		manifest := parseManifest(episode.ManifestURL)
+		pssh := getPssh(manifest)
+		if pssh == nil {
+			panic("PSSH not found")
+		}
+		// getLicense stores the keys in the global "keys" used by downloadParts,
+		// so audio for this version must be downloaded before the next license.
+		if err := getLicense(*pssh, version.contentId, episode.Token); err != nil {
+			panic(fmt.Sprintf("getLicense for %s: %s", version.locale, err))
+		}
+
+		audioSet := manifest.Period[0].AdaptationSets[1]
+		fmt.Printf("Downloading %s audio...\n", trackTitle(version.locale))
+		audioBaseUrl, audioRepresentationId := getBaseUrl(audioSet, false, *audioQuality)
+		if audioBaseUrl == nil {
+			panic(fmt.Sprintf("failed to get the audio base URL for %s, maybe the audio quality you entered is wrong?", version.locale))
+		}
+		audioFile, err := downloadParts(audioBaseUrl, audioRepresentationId, audioSet)
+		if err != nil {
+			panic(err)
+		}
+		audioTracks = append(audioTracks, mediaTrack{file: audioFile, locale: version.locale})
+
+		// The video track is identical across dubs, so download it once using
+		// the first version's keys (already loaded above).
+		if i == 0 {
+			videoSet := manifest.Period[0].AdaptationSets[0]
+			fmt.Println("Downloading video...")
+			baseUrl, representationId := getBaseUrl(videoSet, true, *videoQuality)
+			if baseUrl == nil {
+				panic("failed to get the video base URL, maybe the video quality you entered is wrong?")
+			}
+			videoFile, err = downloadParts(baseUrl, representationId, videoSet)
+			if err != nil {
+				panic(err)
+			}
+		}
+
+		if success := deleteStream(version.contentId, episode.Token); !success {
+			print("Failed to remove the player stream, you will probably have issues downloading other episodes.\n")
+		}
+		delete(activeStreams, version.contentId)
 	}
 
-	baseUrl, representationId := getBaseUrl(videoSet, true, *videoQuality)
-	if baseUrl == nil {
-		print("Failed to get the video base URL, maybe the video quality you entered is wrong?\n")
-		deleteStream(contentId, token)
-		os.Exit(1)
-	}
-	videoFile, err := downloadParts(baseUrl, representationId, videoSet)
-	if err != nil {
-		panic(err)
-	}
-
-	if success := deleteStream(contentId, episode.Token); !success {
-		print("Failed to remove the player stream, you will probably have issues downloading other episodes.\n")
-	}
-
-	mergeEverything(videoFile, audioFile, subsFile, outputFile, subtitlesLang, info)
+	mergeEverything(videoFile, audioTracks, subTracks, outputFile, info)
 }
 
-func downloadSeason(videoQuality, audioLocale, audioQuality, subtitlesLang *string, episodes []SeasonEpisode) {
+func downloadSeason(videoQuality, audioQuality *string, audioLangs, subsLangs []string, episodes []SeasonEpisode) {
 	fmt.Printf("Downloading season %v of %s (%v episodes)\n\n", episodes[0].SeasonNumber, episodes[0].SeriesTitle, len(episodes))
 
 	for _, episode := range episodes {
@@ -304,9 +359,6 @@ func downloadSeason(videoQuality, audioLocale, audioQuality, subtitlesLang *stri
 			Title: episode.Title,
 		}
 
-		if info.EpisodeMetadata.AudioLocale != *audioLocale {
-			info.EpisodeMetadata.AudioLocale = *audioLocale
-		}
-		downloadEpisode(episode.ID, videoQuality, audioQuality, subtitlesLang, info)
+		downloadEpisode(episode.ID, info, audioLangs, subsLangs, videoQuality, audioQuality)
 	}
 }

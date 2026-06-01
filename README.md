@@ -6,7 +6,7 @@ You won't be banned or anything, I downloaded all Kaguya-Sama seasons to test du
 
 ## Features
 
-- Supports choosing the audio and subtitles language
+- Supports choosing the audio and subtitles language, including downloading multiple of each into a single file
 - Supports choosing the audio and video quality
 - Decrypts Widevine DRM (requires: a `.wvd` file or `client_id.bin` and `private_key.pem` files)
 - Adds metadata (like episode name) to the MKV container
@@ -31,7 +31,7 @@ Check the [latest release](https://github.com/CuteTenshii/crunchyroll-downloader
 ```shell
 Usage of ./crunchyroll-downloader:
   -audio-lang string
-        Audio language (default "ja-JP")
+        Audio language(s), comma-separated for multiple (e.g. "ja-JP,en-US"). First is the default track (default "ja-JP")
   -audio-quality string
         Audio quality (default "192k")
   -etp-rt string
@@ -39,7 +39,7 @@ Usage of ./crunchyroll-downloader:
   -season int
         Season number. Not used if an episode link is entered
   -subs-lang string
-        Subtitles language (default "en-US")
+        Subtitle language(s), comma-separated for multiple (e.g. "en-US,es-419"). First is the default track (default "en-US")
   -url string
         URL of the episode/season to download
   -file string
@@ -61,6 +61,11 @@ To download a specific episode:
 To batch download from a file (one URL per line):
 ```shell
 ./crunchyroll-downloader --urls list.txt --etp-rt replace_this --subs-lang pt-BR
+```
+
+To download multiple audio tracks and subtitles into a single file (the first of each is set as the default track). If any requested language is missing for an episode, that episode is skipped:
+```shell
+./crunchyroll-downloader --url https://www.crunchyroll.com/watch/GE00198973JAJP/dawn-and-confusion --etp-rt replace_this --audio-lang ja-JP,en-US --subs-lang en-US,es-419,de-DE
 ```
 
 ## Building

@@ -1,6 +1,7 @@
 package main
 
 var languageNames = map[string]string{
+	"ja-JP":  "日本語",
 	"en-US":  "English",
 	"en-IN":  "English (India)",
 	"id-ID":  "Bahasa Indonesia",
@@ -26,4 +27,35 @@ var languageNames = map[string]string{
 	"zh-TW":  "中文 (國語)",
 	"ko-KR":  "한국어",
 	"th-TH":  "ไทย",
+}
+
+// languageCodes maps a Crunchyroll locale to its ISO 639-2 code, used for the
+// ffmpeg "language" stream tag so media servers can select tracks correctly.
+var languageCodes = map[string]string{
+	"ja-JP":  "jpn",
+	"en-US":  "eng",
+	"en-IN":  "eng",
+	"id-ID":  "ind",
+	"ms-MY":  "msa",
+	"ca-ES":  "cat",
+	"de-DE":  "deu",
+	"es-419": "spa",
+	"es-ES":  "spa",
+	"fr-FR":  "fra",
+	"it-IT":  "ita",
+	"pl-PL":  "pol",
+	"pt-BR":  "por",
+	"pt-PT":  "por",
+	"vi-VN":  "vie",
+	"tr-TR":  "tur",
+	"ru-RU":  "rus",
+	"ar-SA":  "ara",
+	"hi-IN":  "hin",
+	"ta-IN":  "tam",
+	"te-IN":  "tel",
+	"zh-CN":  "zho",
+	"zh-HK":  "zho",
+	"zh-TW":  "zho",
+	"ko-KR":  "kor",
+	"th-TH":  "tha",
 }

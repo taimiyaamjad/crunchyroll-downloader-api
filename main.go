@@ -5,20 +5,31 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"slices"
 	"strings"
 )
 
 var (
 	token         = ""
-	audioLang     = flag.String("audio-lang", "ja-JP", "Audio language")
-	subtitlesLang = flag.String("subs-lang", "en-US", "Subtitles language")
+	audioLang     = flag.String("audio-lang", "ja-JP", "Audio language(s), comma-separated for multiple (e.g. \"ja-JP,en-US\"). First is the default track")
+	subtitlesLang = flag.String("subs-lang", "en-US", "Subtitle language(s), comma-separated for multiple (e.g. \"en-US,es-419\"). First is the default track")
 	videoQuality  = flag.String("video-quality", "1080p", "Video quality")
 	audioQuality  = flag.String("audio-quality", "192k", "Audio quality")
 	seasonNumber  = flag.Int("season", 0, "Season number. Not used if an episode link is entered")
 	etpRt         = flag.String("etp-rt", "", "The \"etp_rt\" cookie value of your account")
 	debug         = flag.Bool("debug-manifest", false, "Log raw episode playback JSON and manifest XML")
 )
+
+// parseLangs splits a comma-separated locale list, trimming spaces and dropping
+// empties.
+func parseLangs(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
 
 func processUrl(url string) {
 	contentType := strings.Split(url, "/")[3]
@@ -32,24 +43,26 @@ func processUrl(url string) {
 		return
 	}
 
+	audioLangs := parseLangs(*audioLang)
+	if len(audioLangs) == 0 {
+		audioLangs = []string{"ja-JP"}
+	}
+	subsLangs := parseLangs(*subtitlesLang)
+
+	// The season/series API endpoints take a single preferred locale; use the
+	// primary (first) requested one. All dub versions are still listed per
+	// episode, so the other languages remain resolvable.
+	primaryAudio := audioLangs[0]
+	primarySubs := "en-US"
+	if len(subsLangs) > 0 {
+		primarySubs = subsLangs[0]
+	}
+
 	if contentType == "watch" {
 		info := getEpisodeInfo(contentId)
-		if info.EpisodeMetadata.AudioLocale != *audioLang {
-			correctGuidI := slices.IndexFunc(info.EpisodeMetadata.Versions, func(v *DubVersion) bool {
-				return v.AudioLocale == *audioLang
-			})
-
-			if correctGuidI == -1 {
-				print("! Invalid audio locale. Please put the locale in the \"ja-JP\", \"en-US\"... format.\n")
-				return
-			}
-			correctGuid := info.EpisodeMetadata.Versions[correctGuidI]
-			contentId = (*correctGuid).GUID
-		}
-
-		downloadEpisode(contentId, videoQuality, audioQuality, subtitlesLang, info)
+		downloadEpisode(contentId, info, audioLangs, subsLangs, videoQuality, audioQuality)
 	} else {
-		seasons := getSeasons(contentId, *audioLang, *subtitlesLang)
+		seasons := getSeasons(contentId, primaryAudio, primarySubs)
 
 		if *seasonNumber != 0 {
 			var seasonId string
@@ -64,14 +77,14 @@ func processUrl(url string) {
 				return
 			}
 
-			episodes := getSeasonEpisodes(seasonId, *audioLang, *subtitlesLang)
-			downloadSeason(videoQuality, audioLang, audioQuality, subtitlesLang, episodes)
+			episodes := getSeasonEpisodes(seasonId, primaryAudio, primarySubs)
+			downloadSeason(videoQuality, audioQuality, audioLangs, subsLangs, episodes)
 		} else {
 			print("No season number specified, downloading all seasons...\n")
 
 			for _, season := range seasons {
-				episodes := getSeasonEpisodes(season.ID, *audioLang, *subtitlesLang)
-				downloadSeason(videoQuality, audioLang, audioQuality, subtitlesLang, episodes)
+				episodes := getSeasonEpisodes(season.ID, primaryAudio, primarySubs)
+				downloadSeason(videoQuality, audioQuality, audioLangs, subsLangs, episodes)
 			}
 		}
 	}
