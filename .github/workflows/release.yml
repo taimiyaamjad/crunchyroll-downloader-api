@@ -1,0 +1,52 @@
+name: Build and Attach Release Artifacts
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.artifact }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            artifact: crdl-linux
+          - goos: darwin
+            goarch: arm64
+            artifact: crdl-macos-arm64
+          - goos: darwin
+            goarch: amd64
+            artifact: crdl-macos-x64
+          - goos: windows
+            goarch: amd64
+            artifact: crdl-windows.exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: go build -trimpath -ldflags="-s -w" -o "${{ matrix.artifact }}" .
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+          ARTIFACT: ${{ matrix.artifact }}
+        run: gh release upload "$TAG" "$ARTIFACT" --clobber
