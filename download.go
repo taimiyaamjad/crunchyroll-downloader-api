@@ -204,7 +204,7 @@ func downloadEpisode(contentId string, videoQuality, audioQuality, subtitlesLang
 	outputFile := fmt.Sprintf("%s/%s S%02vE%02v [%s].mkv",
 		cleanSeriesTitle,
 		cleanSeriesTitle,
-		info.EpisodeMetadata.SeasonNumber, 
+		info.EpisodeMetadata.SeasonNumber,
 		info.EpisodeMetadata.EpisodeNumber,
 		*videoQuality,
 	)
@@ -216,7 +216,7 @@ func downloadEpisode(contentId string, videoQuality, audioQuality, subtitlesLang
 
 	episode := getEpisode(contentId)
 	fmt.Printf("Downloading: %s (S%02vE%02v) from %s\n", info.Title, info.EpisodeMetadata.SeasonNumber, info.EpisodeMetadata.EpisodeNumber, info.EpisodeMetadata.SeriesTitle)
-
+	fmt.Printf("Downloading Audio Locale: %s\n", info.EpisodeMetadata.AudioLocale)
 	manifest := parseManifest(episode.ManifestURL)
 	pssh := getPssh(manifest)
 	if pssh == nil {
@@ -266,7 +266,7 @@ func downloadEpisode(contentId string, videoQuality, audioQuality, subtitlesLang
 	mergeEverything(videoFile, audioFile, subsFile, outputFile, subtitlesLang, info)
 }
 
-func downloadSeason(videoQuality, audioQuality, subtitlesLang *string, episodes []SeasonEpisode) {
+func downloadSeason(videoQuality, audioLocale, audioQuality, subtitlesLang *string, episodes []SeasonEpisode) {
 	fmt.Printf("Downloading season %v of %s (%v episodes)\n\n", episodes[0].SeasonNumber, episodes[0].SeriesTitle, len(episodes))
 
 	for _, episode := range episodes {
@@ -280,6 +280,10 @@ func downloadSeason(videoQuality, audioQuality, subtitlesLang *string, episodes 
 				AvailabilityStarts: episode.AvailabilityStarts,
 			},
 			Title: episode.Title,
+		}
+
+		if info.EpisodeMetadata.AudioLocale != *audioLocale {
+			info.EpisodeMetadata.AudioLocale = *audioLocale
 		}
 		downloadEpisode(episode.ID, videoQuality, audioQuality, subtitlesLang, info)
 	}

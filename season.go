@@ -22,8 +22,16 @@ type SeasonEpisode struct {
 	AvailabilityStarts string        `json:"availability_starts"`
 }
 
-func getSeasonEpisodes(contentId string) []SeasonEpisode {
-	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("https://www.crunchyroll.com/content/v2/cms/seasons/%s/episodes?preferred_audio_language=ja-JP&locale=en-US", contentId), nil)
+func getSeasonEpisodes(contentId string, audio_locale string, sub_locale string) []SeasonEpisode {
+	if audio_locale == "" {
+		audio_locale = "ja-JP"
+	}
+
+	if sub_locale == "" {
+		sub_locale = "en-US"
+	}
+
+	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("https://www.crunchyroll.com/content/v2/cms/seasons/%s/episodes?preferred_audio_language=%s&locale=%s", contentId, audio_locale, sub_locale), nil)
 	if err != nil {
 		panic(err)
 	}
@@ -55,8 +63,16 @@ type Season struct {
 	SeasonNumber int    `json:"season_number"`
 }
 
-func getSeasons(contentId string) []Season {
-	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("https://www.crunchyroll.com/content/v2/cms/series/%s/seasons?force_locale=&preferred_audio_language=ja-JP&locale=en-US", contentId), nil)
+func getSeasons(contentId string, audioLocale string, subLocale string) []Season {
+	if audioLocale == "" {
+		audioLocale = "ja-JP"
+	}
+
+	if subLocale == "" {
+		subLocale = "en-US"
+	}
+
+	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("https://www.crunchyroll.com/content/v2/cms/series/%s/seasons?force_locale=&preferred_audio_language=%s&locale=%s", contentId, audioLocale, subLocale), nil)
 	if err != nil {
 		panic(err)
 	}

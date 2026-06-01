@@ -48,7 +48,7 @@ func processUrl(url string) {
 
 		downloadEpisode(contentId, videoQuality, audioQuality, subtitlesLang, info)
 	} else {
-		seasons := getSeasons(contentId)
+		seasons := getSeasons(contentId, *audioLang, *subtitlesLang)
 
 		if *seasonNumber != 0 {
 			var seasonId string
@@ -63,14 +63,14 @@ func processUrl(url string) {
 				return
 			}
 
-			episodes := getSeasonEpisodes(seasonId)
-			downloadSeason(videoQuality, audioQuality, subtitlesLang, episodes)
+			episodes := getSeasonEpisodes(seasonId, *audioLang, *subtitlesLang)
+			downloadSeason(videoQuality, audioLang, audioQuality, subtitlesLang, episodes)
 		} else {
 			print("No season number specified, downloading all seasons...\n")
 
 			for _, season := range seasons {
-				episodes := getSeasonEpisodes(season.ID)
-				downloadSeason(videoQuality, audioQuality, subtitlesLang, episodes)
+				episodes := getSeasonEpisodes(season.ID, *audioLang, *subtitlesLang)
+				downloadSeason(videoQuality, audioLang, audioQuality, subtitlesLang, episodes)
 			}
 		}
 	}
@@ -78,13 +78,14 @@ func processUrl(url string) {
 
 func main() {
 	url := flag.String("url", "", "URL of the episode/season to download")
-	urlsFile := flag.String("urls", "", "Path to a text file with one URL per line")
+	urlsFile := flag.String("file", "", "Path to a text file with one URL per line")
 	flag.Parse()
 
 	if *url == "" && *urlsFile == "" {
 		flag.Usage()
 		os.Exit(1)
 	}
+
 	if *etpRt == "" {
 		fmt.Println("You must specify the \"-etp-rt\" option!\n- Open Crunchyroll on your browser and log in.\n- Open developer tools (Ctrl+Shift+I), go to \"Application\", and then \"Cookies\".\n- The value of the \"ept_rt\" cookie is what you need to input into this option.")
 		os.Exit(1)

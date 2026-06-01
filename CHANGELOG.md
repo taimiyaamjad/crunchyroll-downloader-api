@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.1
+- Changed the ``urls`` flag to ``file`` flag.
+- Implemented the ``audio-lang`` and ``subs-lang`` flag in the season download.
+
 ## 1.2.0
 
 - Parallel segment downloads (10 workers) for much faster downloads
