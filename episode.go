@@ -52,6 +52,10 @@ func getEpisode(id string) Episode {
 		os.Exit(1)
 	}
 
+	if *debug {
+		fmt.Printf("\n%s\n", string(body))
+	}
+
 	return episode
 }
 
