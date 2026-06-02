@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -234,6 +235,14 @@ func downloadEpisode(baseContentId string, info EpisodeInfo, audioLangs, subsLan
 		guidByLocale[v.AudioLocale] = v.GUID
 	}
 
+	if len(audioLangs) == 1 && audioLangs[0] == "all" {
+		audioLangs = make([]string, 0, len(guidByLocale))
+		for locale := range guidByLocale {
+			audioLangs = append(audioLangs, locale)
+		}
+		sort.Strings(audioLangs)
+	}
+
 	type audioVersion struct {
 		locale    string
 		contentId string
@@ -269,6 +278,16 @@ func downloadEpisode(baseContentId string, info EpisodeInfo, audioLangs, subsLan
 	// availability before downloading anything heavy.
 	firstEpisode := getEpisode(versions[0].contentId)
 	activeStreams[versions[0].contentId] = firstEpisode.Token
+
+	if len(subsLangs) == 1 && subsLangs[0] == "all" {
+		subsLangs = make([]string, 0, len(firstEpisode.Subtitles))
+		for locale, sub := range firstEpisode.Subtitles {
+			if sub != nil && sub.URL != "" {
+				subsLangs = append(subsLangs, locale)
+			}
+		}
+		sort.Strings(subsLangs)
+	}
 
 	for _, locale := range subsLangs {
 		if firstEpisode.Subtitles[locale] == nil {
