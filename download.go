@@ -237,10 +237,19 @@ func downloadEpisode(baseContentId string, info EpisodeInfo, audioLangs, subsLan
 
 	if len(audioLangs) == 1 && audioLangs[0] == "all" {
 		audioLangs = make([]string, 0, len(guidByLocale))
-		for locale := range guidByLocale {
-			audioLangs = append(audioLangs, locale)
+		if primaryLocale := info.EpisodeMetadata.AudioLocale; primaryLocale != "" {
+			if _, ok := guidByLocale[primaryLocale]; ok {
+				audioLangs = append(audioLangs, primaryLocale)
+			}
 		}
-		sort.Strings(audioLangs)
+		for locale := range guidByLocale {
+			if locale != info.EpisodeMetadata.AudioLocale {
+				audioLangs = append(audioLangs, locale)
+			}
+		}
+		if len(audioLangs) > 1 {
+			sort.Strings(audioLangs[1:])
+		}
 	}
 
 	type audioVersion struct {
@@ -258,7 +267,6 @@ func downloadEpisode(baseContentId string, info EpisodeInfo, audioLangs, subsLan
 	}
 
 	fmt.Printf("Downloading: %s (S%02vE%02v) from %s\n", info.Title, info.EpisodeMetadata.SeasonNumber, info.EpisodeMetadata.EpisodeNumber, info.EpisodeMetadata.SeriesTitle)
-	fmt.Printf("Audio locales: %s | Subtitle locales: %s\n", strings.Join(audioLangs, ", "), strings.Join(subsLangs, ", "))
 
 	// activeStreams tracks every playback token we open so we can release them
 	// all if anything fails partway through.
@@ -288,6 +296,8 @@ func downloadEpisode(baseContentId string, info EpisodeInfo, audioLangs, subsLan
 		}
 		sort.Strings(subsLangs)
 	}
+
+	fmt.Printf("Audio locales: %s | Subtitle locales: %s\n", strings.Join(audioLangs, ", "), strings.Join(subsLangs, ", "))
 
 	for _, locale := range subsLangs {
 		if firstEpisode.Subtitles[locale] == nil {
