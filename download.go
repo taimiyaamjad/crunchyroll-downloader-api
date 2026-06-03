@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -234,6 +235,23 @@ func downloadEpisode(baseContentId string, info EpisodeInfo, audioLangs, subsLan
 		guidByLocale[v.AudioLocale] = v.GUID
 	}
 
+	if len(audioLangs) == 1 && audioLangs[0] == "all" {
+		audioLangs = make([]string, 0, len(guidByLocale))
+		if primaryLocale := info.EpisodeMetadata.AudioLocale; primaryLocale != "" {
+			if _, ok := guidByLocale[primaryLocale]; ok {
+				audioLangs = append(audioLangs, primaryLocale)
+			}
+		}
+		for locale := range guidByLocale {
+			if locale != info.EpisodeMetadata.AudioLocale {
+				audioLangs = append(audioLangs, locale)
+			}
+		}
+		if len(audioLangs) > 1 {
+			sort.Strings(audioLangs[1:])
+		}
+	}
+
 	type audioVersion struct {
 		locale    string
 		contentId string
@@ -249,7 +267,6 @@ func downloadEpisode(baseContentId string, info EpisodeInfo, audioLangs, subsLan
 	}
 
 	fmt.Printf("Downloading: %s (S%02vE%02v) from %s\n", info.Title, info.EpisodeMetadata.SeasonNumber, info.EpisodeMetadata.EpisodeNumber, info.EpisodeMetadata.SeriesTitle)
-	fmt.Printf("Audio locales: %s | Subtitle locales: %s\n", strings.Join(audioLangs, ", "), strings.Join(subsLangs, ", "))
 
 	// activeStreams tracks every playback token we open so we can release them
 	// all if anything fails partway through.
@@ -269,6 +286,18 @@ func downloadEpisode(baseContentId string, info EpisodeInfo, audioLangs, subsLan
 	// availability before downloading anything heavy.
 	firstEpisode := getEpisode(versions[0].contentId)
 	activeStreams[versions[0].contentId] = firstEpisode.Token
+
+	if len(subsLangs) == 1 && subsLangs[0] == "all" {
+		subsLangs = make([]string, 0, len(firstEpisode.Subtitles))
+		for locale, sub := range firstEpisode.Subtitles {
+			if sub != nil && sub.URL != "" {
+				subsLangs = append(subsLangs, locale)
+			}
+		}
+		sort.Strings(subsLangs)
+	}
+
+	fmt.Printf("Audio locales: %s | Subtitle locales: %s\n", strings.Join(audioLangs, ", "), strings.Join(subsLangs, ", "))
 
 	for _, locale := range subsLangs {
 		if firstEpisode.Subtitles[locale] == nil {
