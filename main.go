@@ -18,7 +18,13 @@ var (
 	seasonNumber  = flag.Int("season", 0, "Season number. Not used if an episode link is entered")
 	etpRt         = flag.String("etp-rt", "", "The \"etp_rt\" cookie value of your account")
 	debug         = flag.Bool("debug-manifest", false, "Log raw episode playback JSON and manifest XML")
+	downloadDelay = flag.Duration("download-delay", 0, "Minimum delay between episode downloads, to help avoid Crunchyroll's rate limiting (e.g. \"30s\", \"2m\")")
 )
+
+// backoff spaces out consecutive episode downloads by *downloadDelay. It is
+// initialized in main() once flags are parsed, and is a no-op (including when
+// left nil) whenever no delay is configured.
+var backoff *downloadBackoff
 
 // parseLangs splits a comma-separated locale list, trimming spaces and dropping
 // empties.
@@ -70,7 +76,7 @@ func processUrl(url string) {
 
 	if contentType == "watch" {
 		info := getEpisodeInfo(contentId)
-		downloadEpisode(contentId, info, audioLangs, subsLangs, ccLangs, videoQuality, audioQuality)
+		downloadEpisodeWithRetry(contentId, info, audioLangs, subsLangs, ccLangs, videoQuality, audioQuality)
 	} else {
 		seasons := getSeasons(contentId, primaryAudio, primarySubs)
 
@@ -116,6 +122,7 @@ func main() {
 	}
 
 	token = GetAccessToken(*etpRt)
+	backoff = newDownloadBackoff(*downloadDelay)
 
 	if *urlsFile != "" {
 		file, err := os.Open(*urlsFile)

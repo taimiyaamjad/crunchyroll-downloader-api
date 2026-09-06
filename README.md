@@ -44,6 +44,8 @@ Usage of ./crunchyroll-downloader:
         Closed caption language(s), comma-separated for multiple (e.g. "en-US"). Downloaded in addition to --subs-lang, not instead of it
   -debug-manifest
         Log raw episode playback JSON and manifest XML
+  -download-delay duration
+        Minimum delay between episode downloads, to help avoid Crunchyroll's rate limiting (e.g. "30s", "2m")
   -etp-rt string
         The "etp_rt" cookie value of your account
   -file string
@@ -77,6 +79,13 @@ To download multiple audio tracks and subtitles into a single file (the first of
 ```shell
 ./crunchyroll-downloader --url https://www.crunchyroll.com/watch/GE00198973JAJP/dawn-and-confusion --etp-rt replace_this --audio-lang ja-JP,en-US --subs-lang en-US,es-419,de-DE
 ```
+
+If you're getting rate-limited while downloading a season/batch, wait at least this long between each episode:
+```shell
+./crunchyroll-downloader --url https://www.crunchyroll.com/series/GJ0H7Q5ZJ/hells-paradise --season 1 --etp-rt replace_this --download-delay 30s
+```
+
+If Crunchyroll rate-limits an episode anyway, it's retried in place (starting at `-download-delay`, or 1 minute if unset, doubling up to 30 minutes on repeated hits) instead of moving on to the next episode and tripping the same limit again.
 
 ## Building
 

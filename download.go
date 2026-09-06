@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -385,7 +386,7 @@ func filterAvailableLangs(langs []string, available map[string]*Subtitle, kind s
 	return filtered
 }
 
-func downloadEpisode(baseContentId string, info EpisodeInfo, audioLangs, subsLangs, ccLangs []string, videoQuality, audioQuality *string) {
+func downloadEpisode(baseContentId string, info EpisodeInfo, audioLangs, subsLangs, ccLangs []string, videoQuality, audioQuality *string) (err error) {
 	cleanSeriesTitle := sanitizeFilename(info.EpisodeMetadata.SeriesTitle)
 	cleanEpisodeTitle := sanitizeFilename(info.Title)
 
@@ -401,7 +402,7 @@ func downloadEpisode(baseContentId string, info EpisodeInfo, audioLangs, subsLan
 		*videoQuality,
 	))
 
-	if _, err := os.Stat(outputFile); err == nil {
+	if _, statErr := os.Stat(outputFile); statErr == nil {
 		fmt.Printf("Episode %v is already downloaded, skipping...\n", info.EpisodeMetadata.EpisodeNumber)
 		return
 	}
@@ -447,6 +448,11 @@ func downloadEpisode(baseContentId string, info EpisodeInfo, audioLangs, subsLan
 
 	fmt.Printf("Downloading: %s (S%02vE%02v) from %s\n", info.Title, info.EpisodeMetadata.SeasonNumber, info.EpisodeMetadata.EpisodeNumber, info.EpisodeMetadata.SeriesTitle)
 
+	// Space this download out from the previous one, if a delay is configured.
+	// Applied here rather than around the whole function so that episodes
+	// already on disk (returned above) don't burn the wait for nothing.
+	backoff.wait()
+
 	// activeStreams tracks every playback token we open so we can release them
 	// all if anything fails partway through.
 	var (
@@ -454,6 +460,10 @@ func downloadEpisode(baseContentId string, info EpisodeInfo, audioLangs, subsLan
 		activeStreams = map[string]string{}
 	)
 	defer func() {
+		// Start the backoff clock as soon as this download is over, success or
+		// not, so a failed/rate-limited attempt doesn't get retried immediately.
+		backoff.done()
+
 		print("Cleaning up...\n")
 
 		streamsMu.Lock()
@@ -467,7 +477,16 @@ func downloadEpisode(baseContentId string, info EpisodeInfo, audioLangs, subsLan
 			}
 		}
 		if r := recover(); r != nil {
-			fmt.Printf("Recovered from error: %v\n%s\n", r, runtimedebug.Stack())
+			if e, ok := r.(error); ok {
+				err = e
+			} else {
+				err = fmt.Errorf("%v", r)
+			}
+			if *debug {
+				fmt.Printf("Recovered from error: %v\n%s\n", r, runtimedebug.Stack())
+			} else {
+				fmt.Printf("Recovered from error: %v\n", r)
+			}
 		}
 	}()
 
@@ -658,6 +677,29 @@ func downloadEpisode(baseContentId string, info EpisodeInfo, audioLangs, subsLan
 	}
 
 	mergeEverything(videoFile, audioTracks, subTracks, outputFile, info)
+	return nil
+}
+
+// downloadEpisodeWithRetry runs downloadEpisode, retrying the same episode
+// with a growing delay whenever Crunchyroll rate-limits the account, instead
+// of moving on to the next episode and immediately tripping the same rate
+// limit again.
+func downloadEpisodeWithRetry(baseContentId string, info EpisodeInfo, audioLangs, subsLangs, ccLangs []string, videoQuality, audioQuality *string) {
+	for {
+		err := downloadEpisode(baseContentId, info, audioLangs, subsLangs, ccLangs, videoQuality, audioQuality)
+		if err == nil {
+			backoff.resetRateLimit()
+			return
+		}
+		if !errors.Is(err, ErrRateLimited) {
+			return
+		}
+
+		wait := backoff.rateLimitWait()
+		retryAt := time.Now().Add(wait)
+		fmt.Printf("Retrying this episode in %s [%s]...\n", wait.Round(time.Second), retryAt.Local().Format(time.Kitchen))
+		time.Sleep(wait)
+	}
 }
 
 func downloadSeason(videoQuality, audioQuality *string, audioLangs, subsLangs, ccLangs []string, episodes []SeasonEpisode) {
@@ -676,6 +718,6 @@ func downloadSeason(videoQuality, audioQuality *string, audioLangs, subsLangs, c
 			Title: episode.Title,
 		}
 
-		downloadEpisode(episode.ID, info, audioLangs, subsLangs, ccLangs, videoQuality, audioQuality)
+		downloadEpisodeWithRetry(episode.ID, info, audioLangs, subsLangs, ccLangs, videoQuality, audioQuality)
 	}
 }
