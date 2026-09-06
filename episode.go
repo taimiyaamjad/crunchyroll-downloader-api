@@ -2,11 +2,17 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 )
+
+// ErrRateLimited marks a playback error caused by Crunchyroll's 429-class rate
+// limiting, so callers can retry the same episode instead of treating it like
+// any other playback failure and moving on.
+var ErrRateLimited = errors.New("rate limited by Crunchyroll")
 
 // EpisodeError is the playback endpoint's polymorphic "error" field. It is a
 // string message on failure, but Crunchyroll also returns false, null or a bare
@@ -87,6 +93,7 @@ func getEpisode(id string) (Episode, error) {
 		fmt.Println()
 		if strings.HasPrefix(string(episode.Error), "429") {
 			fmt.Println("Crunchyroll is rate-limiting this account. Wait a while before retrying, or use a different account.")
+			return Episode{}, fmt.Errorf("playback error: %s: %w", episode.Error, ErrRateLimited)
 		}
 		return Episode{}, fmt.Errorf("playback error: %s", episode.Error)
 	}
