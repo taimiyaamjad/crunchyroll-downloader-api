@@ -386,15 +386,23 @@ func filterAvailableLangs(langs []string, available map[string]*Subtitle, kind s
 	return filtered
 }
 
-func downloadEpisode(baseContentId string, info EpisodeInfo, audioLangs, subsLangs, ccLangs []string, videoQuality, audioQuality *string) (err error) {
+// downloadEpisode downloads one episode into outDir (or the working directory
+// when outDir is empty) and returns the path of the merged MKV. Giving each
+// API job its own outDir keeps concurrent requests for different audio
+// languages from colliding on the same output filename.
+func downloadEpisode(baseContentId string, info EpisodeInfo, audioLangs, subsLangs, ccLangs []string, videoQuality, audioQuality *string, outDir string) (outputFile string, err error) {
 	cleanSeriesTitle := sanitizeFilename(info.EpisodeMetadata.SeriesTitle)
 	cleanEpisodeTitle := sanitizeFilename(info.Title)
 
-	if _, err := os.Stat(cleanSeriesTitle); err != nil {
-		_ = os.MkdirAll(cleanSeriesTitle, 0777)
+	seriesDir := cleanSeriesTitle
+	if outDir != "" {
+		seriesDir = filepath.Join(outDir, cleanSeriesTitle)
+	}
+	if _, statErr := os.Stat(seriesDir); statErr != nil {
+		_ = os.MkdirAll(seriesDir, 0777)
 	}
 
-	outputFile := filepath.Join(cleanSeriesTitle, fmt.Sprintf("%s S%02dE%02d - %s [%s].mkv",
+	outputFile = filepath.Join(seriesDir, fmt.Sprintf("%s S%02dE%02d - %s [%s].mkv",
 		cleanSeriesTitle,
 		info.EpisodeMetadata.SeasonNumber,
 		info.EpisodeMetadata.EpisodeNumber,
@@ -677,22 +685,22 @@ func downloadEpisode(baseContentId string, info EpisodeInfo, audioLangs, subsLan
 	}
 
 	mergeEverything(videoFile, audioTracks, subTracks, outputFile, info)
-	return nil
+	return outputFile, nil
 }
 
 // downloadEpisodeWithRetry runs downloadEpisode, retrying the same episode
 // with a growing delay whenever Crunchyroll rate-limits the account, instead
 // of moving on to the next episode and immediately tripping the same rate
-// limit again.
-func downloadEpisodeWithRetry(baseContentId string, info EpisodeInfo, audioLangs, subsLangs, ccLangs []string, videoQuality, audioQuality *string) {
+// limit again. It returns the path of the merged MKV on success.
+func downloadEpisodeWithRetry(baseContentId string, info EpisodeInfo, audioLangs, subsLangs, ccLangs []string, videoQuality, audioQuality *string, outDir string) (string, error) {
 	for {
-		err := downloadEpisode(baseContentId, info, audioLangs, subsLangs, ccLangs, videoQuality, audioQuality)
+		file, err := downloadEpisode(baseContentId, info, audioLangs, subsLangs, ccLangs, videoQuality, audioQuality, outDir)
 		if err == nil {
 			backoff.resetRateLimit()
-			return
+			return file, nil
 		}
 		if !errors.Is(err, ErrRateLimited) {
-			return
+			return file, err
 		}
 
 		wait := backoff.rateLimitWait()
@@ -702,7 +710,7 @@ func downloadEpisodeWithRetry(baseContentId string, info EpisodeInfo, audioLangs
 	}
 }
 
-func downloadSeason(videoQuality, audioQuality *string, audioLangs, subsLangs, ccLangs []string, episodes []SeasonEpisode) {
+func downloadSeason(videoQuality, audioQuality *string, audioLangs, subsLangs, ccLangs []string, episodes []SeasonEpisode, outDir string) {
 	fmt.Printf("Downloading season %v of %s (%v episodes)\n\n", episodes[0].SeasonNumber, episodes[0].SeriesTitle, len(episodes))
 
 	for _, episode := range episodes {
@@ -718,6 +726,6 @@ func downloadSeason(videoQuality, audioQuality *string, audioLangs, subsLangs, c
 			Title: episode.Title,
 		}
 
-		downloadEpisodeWithRetry(episode.ID, info, audioLangs, subsLangs, ccLangs, videoQuality, audioQuality)
+		downloadEpisodeWithRetry(episode.ID, info, audioLangs, subsLangs, ccLangs, videoQuality, audioQuality, outDir)
 	}
 }

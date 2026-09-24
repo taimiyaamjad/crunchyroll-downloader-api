@@ -11,3 +11,6 @@ private_key.pem
 # Compiled binaries
 /crunchyroll-downloader
 *.exe
+
+# PocketDev harness data
+.pocketdev/

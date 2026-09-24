@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 )
 
 var (
@@ -19,6 +20,12 @@ var (
 	etpRt         = flag.String("etp-rt", "", "The \"etp_rt\" cookie value of your account")
 	debug         = flag.Bool("debug-manifest", false, "Log raw episode playback JSON and manifest XML")
 	downloadDelay = flag.Duration("download-delay", 0, "Minimum delay between episode downloads, to help avoid Crunchyroll's rate limiting (e.g. \"30s\", \"2m\")")
+
+	serveMode    = flag.Bool("serve", false, "Run the HTTP API server (search + download) instead of the one-shot CLI")
+	listenAddr   = flag.String("addr", ":8080", "Address the HTTP API server listens on (used with -serve)")
+	apiDir       = flag.String("api-dir", "", "Directory for API downloads (default: <system temp>/crdl-api)")
+	cleanupAfter = flag.Duration("cleanup-after", 10*time.Minute, "Delete each API download this long after it finishes, to free disk space")
+	maxJobs      = flag.Int("max-jobs", 2, "Maximum number of concurrent API downloads")
 )
 
 // backoff spaces out consecutive episode downloads by *downloadDelay. It is
@@ -76,7 +83,7 @@ func processUrl(url string) {
 
 	if contentType == "watch" {
 		info := getEpisodeInfo(contentId)
-		downloadEpisodeWithRetry(contentId, info, audioLangs, subsLangs, ccLangs, videoQuality, audioQuality)
+		downloadEpisodeWithRetry(contentId, info, audioLangs, subsLangs, ccLangs, videoQuality, audioQuality, "")
 	} else {
 		seasons := getSeasons(contentId, primaryAudio, primarySubs)
 
@@ -94,13 +101,13 @@ func processUrl(url string) {
 			}
 
 			episodes := getSeasonEpisodes(seasonId, primaryAudio, primarySubs)
-			downloadSeason(videoQuality, audioQuality, audioLangs, subsLangs, ccLangs, episodes)
+			downloadSeason(videoQuality, audioQuality, audioLangs, subsLangs, ccLangs, episodes, "")
 		} else {
 			print("No season number specified, downloading all seasons...\n")
 
 			for _, season := range seasons {
 				episodes := getSeasonEpisodes(season.ID, primaryAudio, primarySubs)
-				downloadSeason(videoQuality, audioQuality, audioLangs, subsLangs, ccLangs, episodes)
+				downloadSeason(videoQuality, audioQuality, audioLangs, subsLangs, ccLangs, episodes, "")
 			}
 		}
 	}
@@ -110,6 +117,13 @@ func main() {
 	url := flag.String("url", "", "URL of the episode/season to download")
 	urlsFile := flag.String("file", "", "Path to a text file with one URL per line")
 	flag.Parse()
+
+	// The API server runs as a long-lived process and accepts credentials per
+	// request, so it does not require -url/-file or -etp-rt up front.
+	if *serveMode {
+		runServer()
+		return
+	}
 
 	if *url == "" && *urlsFile == "" {
 		flag.Usage()
@@ -121,7 +135,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	token = GetAccessToken(*etpRt)
+	setCredentials(GetAccessToken(*etpRt), *etpRt)
 	backoff = newDownloadBackoff(*downloadDelay)
 
 	if *urlsFile != "" {

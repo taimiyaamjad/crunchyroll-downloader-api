@@ -14,6 +14,10 @@ const progressWidth = 40
 // esc is the ANSI escape prefix used to move the cursor and clear lines.
 const esc = "\x1b"
 
+// quietProgress disables terminal progress rendering. The API server sets it so
+// concurrent downloads don't spam ANSI cursor escapes into the server log.
+var quietProgress bool
+
 const (
 	// rateWindow is the sliding window over which the download rate is averaged.
 	rateWindow = 2 * time.Second
@@ -173,6 +177,9 @@ func (b *progressBar) renderLine(titleWidth int) string {
 // renderLocked rewrites every bar on its own line, moving the cursor back over
 // the previous frame first. It must be called with progressRenderer.mu held.
 func renderLocked() {
+	if quietProgress {
+		return
+	}
 	titleWidth := 0
 	for _, b := range progressRenderer.bars {
 		if w := displayWidth(b.title); w > titleWidth {

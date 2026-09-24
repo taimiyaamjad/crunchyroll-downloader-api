@@ -4,16 +4,16 @@
 
 - Audio dubs, subtitles, closed captions and the video track now download concurrently instead of one after another, making multi-language downloads much faster
 - Added progress bars showing percentage, segment count and download speed (Mbps) for every active download
-- Playback errors now surface the API's error reason, and rate-limited (429) responses print a hint to wait or use a different account ([#47](https://github.com/CuteTenshii/crunchyroll-downloader/issues/47))
+- Playback errors now surface the API's error reason, and rate-limited (429) responses print a hint to wait or use a different account (#47)
 - Fixed a bug where retrying a request after refreshing an expired access token sent an empty or truncated body, breaking license requests
 
 ## 1.4.0
 
-- Added support for on-demand (single-file) manifests and normalized non-Widevine PSSH system IDs, fixing "PSSH not found" and PlayReady errors on some episodes ([#8](https://github.com/CuteTenshii/crunchyroll-downloader/issues/8), [#38](https://github.com/CuteTenshii/crunchyroll-downloader/issues/38), [#39](https://github.com/CuteTenshii/crunchyroll-downloader/issues/39))
-- Fixed a crash when the playback response "error" field is a boolean or number instead of a string ([#29](https://github.com/CuteTenshii/crunchyroll-downloader/issues/29))
-- Fixed audio language selection so dubs resolve from the versions list instead of silently downloading the original language ([#35](https://github.com/CuteTenshii/crunchyroll-downloader/issues/35))
-- Unavailable subtitle and caption locales are now skipped instead of aborting the whole episode ([#27](https://github.com/CuteTenshii/crunchyroll-downloader/issues/27))
-- Unavailable audio locales are now skipped, downloading whichever of the requested languages are available ([#28](https://github.com/CuteTenshii/crunchyroll-downloader/issues/28))
+- Added support for on-demand (single-file) manifests and normalized non-Widevine PSSH system IDs, fixing "PSSH not found" and PlayReady errors on some episodes (#8, #38, #39)
+- Fixed a crash when the playback response "error" field is a boolean or number instead of a string (#29)
+- Fixed audio language selection so dubs resolve from the versions list instead of silently downloading the original language (#35)
+- Unavailable subtitle and caption locales are now skipped instead of aborting the whole episode (#27)
+- Unavailable audio locales are now skipped, downloading whichever of the requested languages are available (#28)
 - Fixed URL parsing for locale-prefixed links such as /fr/series/...
 
 ## 1.3.0
