@@ -1,6 +1,7 @@
 # Crunchyroll Downloader API
 
 **Made by Zenova (Taimiya Amjad)**
+
 **A Huge Shoutout to CuteTenshii for the Existing Project**
 
 [![Tests](https://img.shields.io/github/actions/workflow/status/taimiyaamjad/crunchyroll-downloader-api/tests.yml?branch=master&label=tests)](https://github.com/taimiyaamjad/crunchyroll-downloader-api/actions/workflows/tests.yml)
