@@ -264,10 +264,11 @@ If you're getting rate-limited while downloading a season/batch, wait at least t
 
 If Crunchyroll rate-limits an episode anyway, it's retried in place (starting at `-download-delay`, or 1 minute if unset, doubling up to 30 minutes on repeated hits) instead of moving on to the next episode and tripping the same limit again.
 
-## HTTP API (search + download)
+## HTTP API (watch, download & search)
 
-Instead of the one-shot CLI, run a small HTTP API that searches Crunchyroll and
-serves the finished video directly in the browser. Downloads are written to a
+Instead of the one-shot CLI, run a small HTTP API that searches Crunchyroll,
+**streams anime directly online in your browser** (`/api/watch`), and downloads
+single episodes or entire seasons (`/api/download`). Downloads are written to a
 temporary directory and **deleted 10 minutes after they finish**, so you don't
 have to clean up space by hand.
 
@@ -277,56 +278,68 @@ Start the server:
 ./crunchyroll-downloader -serve -addr :8080 -etp-rt replace_this
 ```
 
-Then open a URL in Chrome (or `curl`, or VLC):
+### 1. Watch Online Directly in Chrome (`/api/watch`)
+
+To stream an anime online directly in your browser:
 
 ```text
-http://localhost:8080/api/download?https://www.crunchyroll.com/watch/GE00198973JAJP?language(en)?1080p
+http://localhost:8080/api/watch?https://www.crunchyroll.com/watch/GE00198973JAJP?language=hi? quality=1080p
 ```
 
-The same request can also be written as normal query parameters:
+Or using standard parameters:
 
 ```text
-http://localhost:8080/api/download?url=https://www.crunchyroll.com/watch/GE00198973JAJP&language=en&quality=1080p
+http://localhost:8080/api/watch?url=https://www.crunchyroll.com/watch/GE00198973JAJP&language=hi&quality=1080p
+```
+
+- **Hindi Dubs**: Use **`hi`** as the short code (automatically maps to `hi-IN`).
+- **Inline Streaming**: Streams video with `Content-Disposition: inline` and HTTP range support so you can seek instantly.
+- **Web Player**: Add `&player=1` to watch in a responsive HTML5 video player with episode title, series metadata, and download link.
+
+### 2. Download Whole Season or Single Episode (`/api/download`)
+
+To download a single episode:
+
+```text
+http://localhost:8080/api/download?url=https://www.crunchyroll.com/watch/GE00198973JAJP&language=hi&quality=1080p
+```
+
+To download an **entire season** (served as a single `.zip` file containing all episodes):
+
+```text
+http://localhost:8080/api/download?url=https://www.crunchyroll.com/series/GJ0H7Q5ZJ/hells-paradise&season=1&language=hi&quality=1080p
+```
+
+Or in terse format:
+
+```text
+http://localhost:8080/api/download?https://www.crunchyroll.com/series/GJ0H7Q5ZJ?season=1?language(hi)?1080p
 ```
 
 ### Endpoints
 
 | Endpoint | Description |
 | --- | --- |
-| `GET /` | JSON index of the available endpoints and examples |
+| `GET /` | JSON index of available endpoints and examples |
 | `GET /api/health` | Uptime, active jobs and number of tracked files |
-| `GET /api/search?q=<title>&limit=10` | Search Crunchyroll series, seasons and episodes. Each result has a ready-to-use `url` |
-| `GET /api/download?...` | Download an episode and stream back the merged MKV |
-| `GET /api/file/<job_id>` | Re-download / stream a finished job while it still exists |
+| `GET /api/search?q=<title>&limit=10` | Search Crunchyroll series, seasons and episodes with ready-to-use URLs |
+| `GET /api/watch?...` | Directly stream an episode online in Chrome (inline video or web player with `&player=1`) |
+| `GET /api/download?...` | Download single episode (MKV) or whole season (ZIP) |
+| `GET /api/file/<job_id>` | Re-download or stream (`?inline=1`) a finished job while it still exists |
 
-### `/api/download` parameters
+### Request Parameters (`/api/watch` & `/api/download`)
 
 | Parameter | Default | Description |
 | --- | --- | --- |
-| `url` (or `episode`, `ep`) | — | A `/watch/` episode URL. You can also put the bare URL in the query string and skip the key |
-| `language` (or `lang`, `audio`) | episode's primary dub | `en`, `en-US`, `hi`, `ja-JP`… A bare code like `en` is matched against the episode's available dubs |
-| `quality` (or `res`) | `1080p` | `1080p`, `720p`, `480p`, `360p` (`1080` also works) |
+| `url` (or `episode`, `ep`, `series`) | — | Crunchyroll `/watch/` episode URL or `/series/` URL |
+| `language` (or `lang`, `audio`) | episode's primary dub | Language code: **`hi`** (Hindi / `hi-IN`), `en` (`en-US`), `ja` (`ja-JP`), etc. |
+| `quality` (or `res`) | `1080p` | `1080p`, `720p`, `480p`, `360p` |
+| `season` (or `s`) | `1` (for series) | Season number to download (e.g. `1`, `2`, or `all`) |
+| `player` | `false` | When set to `1` on `/api/watch`, displays the built-in HTML5 web player |
 | `audio_quality` | `192k` | Audio bitrate |
 | `subs` / `cc` | `-subs-lang` / `-cc-lang` values | Comma-separated subtitle / caption locales |
 | `etp_rt` | server account | Override the account for this one request |
-| `format=json` | stream | Return JSON with a `/api/file/<job_id>` link instead of the video body |
-
-Responses stream the file as `video/x-matroska` with `Content-Disposition:
-attachment`, and support HTTP range requests so a browser or player can seek.
-If `format=json` is set, the response looks like:
-
-```json
-{
-  "status": "ready",
-  "job_id": "9f2c...",
-  "filename": "Hells Paradise S01E01 - ... [en-US].mkv",
-  "url": "/api/file/9f2c...",
-  "size_bytes": 123456789,
-  "language": "en-US",
-  "quality": "1080p",
-  "expires_in_seconds": 600
-}
-```
+| `format=json` | stream / file | Return JSON descriptor with file link instead of the media body |
 
 ### Server flags
 
@@ -337,6 +350,7 @@ If `format=json` is set, the response looks like:
 -cleanup-after 10m     Delete each download this long after it finishes
 -max-jobs 2            Maximum concurrent downloads
 ```
+
 
 If no `-etp-rt` is given at startup, clients must pass `etp_rt=...` on each
 request (or the server returns `401`). The token is refreshed automatically

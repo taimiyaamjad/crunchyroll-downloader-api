@@ -1,10 +1,12 @@
 package main
 
 import (
+	"archive/zip"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"io"
 	"log"
 	"mime"
@@ -30,6 +32,7 @@ import (
 type tempEntry struct {
 	dir       string
 	file      string
+	cacheKey  string
 	expiresAt time.Time
 }
 
@@ -45,9 +48,30 @@ func newTempStore(ttl time.Duration) *tempStore {
 
 // add registers a freshly downloaded file, starting its expiry clock.
 func (s *tempStore) add(id, dir, file string) {
+	s.addWithKey(id, dir, file, "")
+}
+
+// addWithKey registers a freshly downloaded file with an optional cache key.
+func (s *tempStore) addWithKey(id, dir, file, cacheKey string) {
 	s.mu.Lock()
-	s.entries[id] = &tempEntry{dir: dir, file: file, expiresAt: time.Now().Add(s.ttl)}
+	s.entries[id] = &tempEntry{dir: dir, file: file, cacheKey: cacheKey, expiresAt: time.Now().Add(s.ttl)}
 	s.mu.Unlock()
+}
+
+// findByKey searches for an unexpired entry with a matching cacheKey.
+func (s *tempStore) findByKey(key string) (string, *tempEntry, bool) {
+	if key == "" {
+		return "", nil, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	for id, e := range s.entries {
+		if e.cacheKey == key && now.Before(e.expiresAt) {
+			return id, e, true
+		}
+	}
+	return "", nil, false
 }
 
 // touch restarts the expiry clock, used while a file is being streamed so a
@@ -173,6 +197,7 @@ func runServer() {
 	mux.HandleFunc("/api/health", srv.handleHealth)
 	mux.HandleFunc("/api/search", srv.handleSearch)
 	mux.HandleFunc("/api/download", srv.handleDownload)
+	mux.HandleFunc("/api/watch", srv.handleWatch)
 	mux.HandleFunc("/api/file/", srv.handleFile)
 
 	log.Printf("Crunchyroll API listening on %s", *listenAddr)
@@ -208,24 +233,32 @@ func (s *apiServer) handleIndex(w http.ResponseWriter, r *http.Request) {
 		"service": "crunchyroll-downloader-api",
 		"endpoints": []string{
 			"GET /api/search?q=<query>&limit=10",
-			"GET /api/download?url=<episode_url>&language=en&quality=1080p",
+			"GET /api/watch?url=<episode_url>&language=hi&quality=1080p",
+			"GET /api/download?url=<episode_or_series_url>&language=hi&quality=1080p",
 			"GET /api/file/<job_id>",
 			"GET /api/health",
 		},
 		"examples": []string{
-			"/api/download?url=https://www.crunchyroll.com/watch/GYXXXXXX&language=en&quality=1080p",
-			"/api/download?https://www.crunchyroll.com/watch/GYXXXXXX?language(en)?1080p",
-			"/api/download?url=https://www.crunchyroll.com/watch/GYXXXXXX&language=en&format=json",
+			"/api/watch?url=https://www.crunchyroll.com/watch/GYXXXXXX&language=hi&quality=1080p",
+			"/api/watch?https://www.crunchyroll.com/watch/GYXXXXXX?language=hi? quality=1080p",
+			"/api/watch?url=https://www.crunchyroll.com/watch/GYXXXXXX&language=hi&player=1",
+			"/api/download?url=https://www.crunchyroll.com/watch/GYXXXXXX&language=hi&quality=1080p",
+			"/api/download?url=https://www.crunchyroll.com/series/GYXXXXXX&season=1&language=hi&quality=1080p",
+			"/api/download?https://www.crunchyroll.com/watch/GYXXXXXX?language(hi)?1080p",
+			"/api/download?url=https://www.crunchyroll.com/watch/GYXXXXXX&language=hi&format=json",
 		},
 		"cleanup": fmt.Sprintf("downloaded videos are deleted %s after the download finishes", s.ttl),
 		"notes": []string{
-			"language accepts a full locale (en-US) or a bare code (en); a bare code is matched against the episode's available dubs.",
+			"for Hindi use 'hi' as the short code (automatically maps to hi-IN).",
+			"GET /api/watch streams the video directly online in Chrome (inline playback with range requests). Append &player=1 for a built-in web player page.",
+			"GET /api/download downloads a single episode (.mkv) or an entire season (.zip when given a /series/ URL or season=N).",
 			"quality is a video height such as 1080p, 720p, 480p or 360p. audio_quality defaults to 192k.",
 			"format=json returns a JSON descriptor with /api/file/<job_id> instead of streaming the video body.",
 			"pass etp_rt=... to override the server account for a single request.",
 		},
 	})
 }
+
 
 func (s *apiServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -238,12 +271,15 @@ func (s *apiServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------------------------
-// Download endpoint
+// Download and Watch endpoints
 // ---------------------------------------------------------------------------
 
 var (
-	langParenRe = regexp.MustCompile(`(?i)^(?:language|lang|audio)\(([^)]+)\)$`)
-	qualityRe   = regexp.MustCompile(`(?i)^\d{3,4}p$`)
+	langParenRe   = regexp.MustCompile(`(?i)^(?:language|lang|audio)\(([^)]+)\)$`)
+	seasonParenRe = regexp.MustCompile(`(?i)^(?:season|s)\(([^)]+)\)$`)
+	seasonTokenRe = regexp.MustCompile(`(?i)^(?:s|season)(\d{1,2})$`)
+	epTokenRe     = regexp.MustCompile(`(?i)^(?:e|ep|episode)(\d{1,4})$`)
+	qualityRe     = regexp.MustCompile(`(?i)^(\d{3,4})p?$`)
 )
 
 type downloadRequest struct {
@@ -255,27 +291,50 @@ type downloadRequest struct {
 	cc           []string
 	etpRT        string
 	asJSON       bool
+	season       int  // 0 = first/unspecified, >0 = season number, -1 = all
+	episode      int  // specific episode number for watching
+	player       bool // render HTML5 video player page
+	stream       bool // inline streaming
 }
 
 // parseDownloadRequest reads the parameters from either the standard query
 // string form (url=...&language=...&quality=...) or the terse browser form
-// (/api/download?<episode-url>?language(en)?1080p).
+// (/api/download?<url>?language(hi)?1080p).
 func parseDownloadRequest(r *http.Request) (*downloadRequest, error) {
 	q := r.URL.Query()
+	seasonVal := 0
+	if sStr := firstNonEmpty(q.Get("season"), q.Get("s"), q.Get("season_number")); sStr != "" {
+		if strings.EqualFold(sStr, "all") {
+			seasonVal = -1
+		} else if n, err := strconv.Atoi(sStr); err == nil {
+			seasonVal = n
+		}
+	}
+	epVal := 0
+	if eStr := firstNonEmpty(q.Get("episode"), q.Get("ep"), q.Get("e"), q.Get("ep_num")); eStr != "" {
+		if n, err := strconv.Atoi(eStr); err == nil {
+			epVal = n
+		}
+	}
+
 	req := &downloadRequest{
-		url:          firstNonEmpty(q.Get("url"), q.Get("episode"), q.Get("ep")),
+		url:          firstNonEmpty(q.Get("url"), q.Get("episode_url"), q.Get("ep_url"), q.Get("series_url")),
 		language:     firstNonEmpty(q.Get("language"), q.Get("lang"), q.Get("audio_lang"), q.Get("audio")),
 		quality:      firstNonEmpty(q.Get("quality"), q.Get("video_quality"), q.Get("res"), q.Get("resolution")),
 		audioQuality: firstNonEmpty(q.Get("audio_quality"), q.Get("audioq")),
 		etpRT:        firstNonEmpty(q.Get("etp_rt"), q.Get("etp-rt")),
 		subs:         parseLangs(firstNonEmpty(q.Get("subs"), q.Get("subs_lang"), q.Get("subtitles"))),
 		cc:           parseLangs(q.Get("cc")),
+		season:       seasonVal,
+		episode:      epVal,
+		player:       q.Get("player") == "1" || strings.EqualFold(q.Get("player"), "true") || strings.EqualFold(q.Get("format"), "player") || strings.EqualFold(q.Get("format"), "html"),
+		stream:       q.Get("stream") == "1" || strings.EqualFold(q.Get("stream"), "true") || q.Get("inline") == "1",
 	}
 	req.asJSON = strings.EqualFold(q.Get("format"), "json")
 
 	// Fall back to the terse form whenever the standard keys were not used.
-	if req.url == "" || req.language == "" || req.quality == "" {
-		lu, ll, lq := parseLooseDownloadQuery(r.URL.RawQuery)
+	if req.url == "" || req.language == "" || req.quality == "" || req.season == 0 {
+		lu, ll, lq, ls, le, lp := parseLooseDownloadQuery(r.URL.RawQuery)
 		if req.url == "" {
 			req.url = lu
 		}
@@ -285,18 +344,27 @@ func parseDownloadRequest(r *http.Request) (*downloadRequest, error) {
 		if req.quality == "" {
 			req.quality = lq
 		}
+		if req.season == 0 {
+			req.season = ls
+		}
+		if req.episode == 0 {
+			req.episode = le
+		}
+		if !req.player {
+			req.player = lp
+		}
 	}
 
 	if req.url == "" {
-		return nil, fmt.Errorf("missing episode url, use /api/download?url=<episode_url>&language=en&quality=1080p")
+		return nil, fmt.Errorf("missing episode or series url (e.g. /api/watch?url=<url>&language=hi&quality=1080p)")
 	}
 	return req, nil
 }
 
-// parseLooseDownloadQuery extracts an episode URL, language and quality from a
-// raw query that is not a normal key=value list, e.g.
-// "https://www.crunchyroll.com/watch/GY123?language(en)?1080p".
-func parseLooseDownloadQuery(raw string) (epURL, language, quality string) {
+// parseLooseDownloadQuery extracts parameters from a raw query that is not
+// a standard key=value list, e.g.:
+// "https://www.crunchyroll.com/watch/GY123?language=hi? quality=1080p"
+func parseLooseDownloadQuery(raw string) (epURL, language, quality string, season int, episode int, player bool) {
 	if raw == "" {
 		return
 	}
@@ -304,42 +372,76 @@ func parseLooseDownloadQuery(raw string) (epURL, language, quality string) {
 		raw = decoded
 	}
 
-	// First pass: explicit key=value pairs, plus language(x) and bare qualities.
+	// First pass: explicit key=value pairs, plus language(x), quality, season, player
 	for _, token := range strings.Split(raw, "?") {
 		for _, pair := range strings.Split(token, "&") {
+			pair = strings.TrimSpace(pair)
+			if pair == "" {
+				continue
+			}
 			key, value, ok := strings.Cut(pair, "=")
 			if !ok {
-				pair = strings.TrimSpace(pair)
 				if m := langParenRe.FindStringSubmatch(pair); m != nil {
 					if language == "" {
 						language = m[1]
 					}
-				} else if qualityRe.MatchString(pair) && quality == "" {
-					quality = pair
+				} else if m := seasonParenRe.FindStringSubmatch(pair); m != nil {
+					if season == 0 {
+						season, _ = strconv.Atoi(m[1])
+					}
+				} else if m := seasonTokenRe.FindStringSubmatch(pair); m != nil {
+					if season == 0 {
+						season, _ = strconv.Atoi(m[1])
+					}
+				} else if m := epTokenRe.FindStringSubmatch(pair); m != nil {
+					if episode == 0 {
+						episode, _ = strconv.Atoi(m[1])
+					}
+				} else if m := qualityRe.FindStringSubmatch(pair); m != nil && quality == "" {
+					quality = m[1] + "p"
+				} else if isBareLanguage(pair) && language == "" {
+					language = pair
+				} else if strings.EqualFold(pair, "player") {
+					player = true
 				}
 				continue
 			}
-			switch strings.ToLower(strings.TrimSpace(key)) {
-			case "url", "episode", "ep", "video":
+
+			k := strings.ToLower(strings.TrimSpace(key))
+			v := strings.TrimSpace(value)
+			switch k {
+			case "url", "episode_url", "ep_url", "series_url", "episode", "ep", "video":
 				if epURL == "" {
-					epURL = value
+					epURL = v
 				}
-			case "language", "lang":
+			case "language", "lang", "audio", "audio_lang":
 				if language == "" {
-					language = value
+					language = v
 				}
-			case "quality", "q", "res", "resolution":
+			case "quality", "q", "res", "resolution", "video_quality":
 				if quality == "" {
-					quality = value
+					quality = v
 				}
+			case "season", "s", "season_number":
+				if strings.EqualFold(v, "all") {
+					season = -1
+				} else if n, err := strconv.Atoi(v); err == nil && season == 0 {
+					season = n
+				}
+			case "ep_num", "episode_number", "e":
+				if n, err := strconv.Atoi(v); err == nil && episode == 0 {
+					episode = n
+				}
+			case "player":
+				player = v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes")
 			}
 		}
 	}
 
-	// Second pass: a bare URL with its scheme.
+	// Second pass: a bare URL with its scheme or crunchyroll host
 	for _, token := range strings.Split(raw, "?") {
 		token = strings.TrimSpace(token)
-		if strings.HasPrefix(token, "http://") || strings.HasPrefix(token, "https://") {
+		if strings.HasPrefix(token, "http://") || strings.HasPrefix(token, "https://") || strings.Contains(token, "crunchyroll.com/") {
 			if epURL == "" {
 				epURL = token
 			}
@@ -347,6 +449,146 @@ func parseLooseDownloadQuery(raw string) (epURL, language, quality string) {
 		}
 	}
 	return
+}
+
+// handleWatch directly streams an anime online in Chrome (inline playback),
+// with range request support and an optional built-in web player.
+func (s *apiServer) handleWatch(w http.ResponseWriter, r *http.Request) {
+	req, err := parseDownloadRequest(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if req.etpRT != "" {
+		t, err := tryGetAccessToken(req.etpRT)
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, "invalid etp_rt cookie: "+err.Error())
+			return
+		}
+		setCredentials(t, req.etpRT)
+	}
+	if getToken() == "" {
+		writeError(w, http.StatusUnauthorized, "no Crunchyroll credentials: start the server with -etp-rt or pass etp_rt=... on the request")
+		return
+	}
+
+	contentType, contentId := parseUrl(req.url)
+	if contentType == "" || contentId == "" {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid Crunchyroll URL: %s", req.url))
+		return
+	}
+
+	languageCode := canonicalLocale(req.language)
+	quality := normalizeQuality(req.quality)
+	audioQuality := strings.TrimSpace(req.audioQuality)
+	if audioQuality == "" {
+		audioQuality = "192k"
+	}
+
+	targetEpisodeID := contentId
+	if contentType == "series" {
+		primaryAudio := languageCode
+		if primaryAudio == "" {
+			primaryAudio = "ja-JP"
+		}
+		primarySubs := "en-US"
+		if len(req.subs) > 0 {
+			primarySubs = req.subs[0]
+		}
+		seasons, err := safeGetSeasons(contentId, primaryAudio, primarySubs)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "failed to fetch seasons: "+err.Error())
+			return
+		}
+		targetSeason := seasons[0]
+		if req.season > 0 {
+			for _, sn := range seasons {
+				if sn.SeasonNumber == req.season {
+					targetSeason = sn
+					break
+				}
+			}
+		}
+		episodes, err := safeGetSeasonEpisodes(targetSeason.ID, primaryAudio, primarySubs)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "failed to fetch season episodes: "+err.Error())
+			return
+		}
+		chosenEpisode := episodes[0]
+		if req.episode > 0 {
+			for _, ep := range episodes {
+				if ep.EpisodeNumber == req.episode {
+					chosenEpisode = ep
+					break
+				}
+			}
+		}
+		targetEpisodeID = chosenEpisode.ID
+	}
+
+	info, err := safeEpisodeInfo(targetEpisodeID)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "failed to fetch episode info: "+err.Error())
+		return
+	}
+
+	language := resolveAudioLocale(languageCode, info)
+	cacheKey := fmt.Sprintf("watch:%s:%s:%s", targetEpisodeID, language, quality)
+
+	// Check if already downloaded and alive in cache
+	if cachedID, entry, ok := s.store.findByKey(cacheKey); ok {
+		if fileInfo, err := os.Stat(entry.file); err == nil && !fileInfo.IsDir() {
+			if req.player {
+				s.renderPlayer(w, r, cachedID, entry.file, info, language, quality)
+				return
+			}
+			s.serveEntry(w, r, cachedID, entry.file, fileInfo, true)
+			return
+		}
+	}
+
+	// Concurrency gate
+	select {
+	case s.jobs <- struct{}{}:
+		defer func() { <-s.jobs }()
+	default:
+		writeError(w, http.StatusTooManyRequests, "server busy: too many concurrent downloads, retry shortly")
+		return
+	}
+
+	jobID := newJobID()
+	outDir := filepath.Join(s.root, jobID)
+	if err := os.MkdirAll(outDir, 0o777); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create job directory: "+err.Error())
+		return
+	}
+
+	log.Printf("watch stream preparation started: episode=%s language=%s quality=%s job=%s", targetEpisodeID, language, quality, jobID)
+	videoPath, err := downloadEpisodeWithRetry(targetEpisodeID, info, []string{language}, req.subs, req.cc, &quality, &audioQuality, outDir)
+	if err != nil {
+		_ = os.RemoveAll(outDir)
+		writeError(w, http.StatusBadGateway, "download failed: "+err.Error())
+		return
+	}
+
+	fileInfo, statErr := os.Stat(videoPath)
+	if statErr != nil || fileInfo.IsDir() {
+		_ = os.RemoveAll(outDir)
+		writeError(w, http.StatusNotFound, fmt.Sprintf("no video was produced for language %q; available audio: %s",
+			language, strings.Join(availableAudioLocales(info), ", ")))
+		return
+	}
+
+	s.store.addWithKey(jobID, outDir, videoPath, cacheKey)
+
+	if req.player {
+		s.renderPlayer(w, r, jobID, videoPath, info, language, quality)
+		return
+	}
+
+	// Direct online stream (Chrome will stream it inline inside the tab)
+	s.serveEntry(w, r, jobID, videoPath, fileInfo, true)
 }
 
 func (s *apiServer) handleDownload(w http.ResponseWriter, r *http.Request) {
@@ -370,32 +612,25 @@ func (s *apiServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	contentType, contentId := parseUrl(req.url)
-	if contentType != "watch" {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("only /watch/ episode URLs are supported by /api/download (got %q); use /api/search to find episodes", req.url))
+	if contentType != "watch" && contentType != "series" {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("unsupported Crunchyroll URL (expected /watch/ or /series/): %s", req.url))
 		return
 	}
 
-	// Concurrency gate: refuse rather than queue indefinitely, so callers get a
-	// clear retry signal instead of a request that hangs for minutes.
+	language := canonicalLocale(req.language)
+	quality := normalizeQuality(req.quality)
+	audioQuality := strings.TrimSpace(req.audioQuality)
+	if audioQuality == "" {
+		audioQuality = "192k"
+	}
+
+	// Concurrency gate: refuse rather than queue indefinitely
 	select {
 	case s.jobs <- struct{}{}:
 		defer func() { <-s.jobs }()
 	default:
 		writeError(w, http.StatusTooManyRequests, "server busy: too many concurrent downloads, retry shortly")
 		return
-	}
-
-	info, err := safeEpisodeInfo(contentId)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "failed to fetch episode info: "+err.Error())
-		return
-	}
-
-	language := resolveAudioLocale(req.language, info)
-	quality := normalizeQuality(req.quality)
-	audioQuality := strings.TrimSpace(req.audioQuality)
-	if audioQuality == "" {
-		audioQuality = "192k"
 	}
 
 	jobID := newJobID()
@@ -405,41 +640,180 @@ func (s *apiServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("download started: episode=%s language=%s quality=%s audio=%s job=%s", contentId, language, quality, audioQuality, jobID)
-	start := time.Now()
-	videoPath, err := downloadEpisodeWithRetry(contentId, info, []string{language}, req.subs, req.cc, &quality, &audioQuality, outDir)
+	// Case 1: Single episode download
+	if contentType == "watch" {
+		info, err := safeEpisodeInfo(contentId)
+		if err != nil {
+			_ = os.RemoveAll(outDir)
+			writeError(w, http.StatusBadGateway, "failed to fetch episode info: "+err.Error())
+			return
+		}
+
+		resolvedLang := resolveAudioLocale(language, info)
+		log.Printf("download started: episode=%s language=%s quality=%s audio=%s job=%s", contentId, resolvedLang, quality, audioQuality, jobID)
+		start := time.Now()
+		videoPath, err := downloadEpisodeWithRetry(contentId, info, []string{resolvedLang}, req.subs, req.cc, &quality, &audioQuality, outDir)
+		if err != nil {
+			_ = os.RemoveAll(outDir)
+			writeError(w, http.StatusBadGateway, "download failed: "+err.Error())
+			return
+		}
+
+		fileInfo, statErr := os.Stat(videoPath)
+		if statErr != nil || fileInfo.IsDir() {
+			_ = os.RemoveAll(outDir)
+			writeError(w, http.StatusNotFound, fmt.Sprintf("no video was produced for language %q; available audio: %s",
+				resolvedLang, strings.Join(availableAudioLocales(info), ", ")))
+			return
+		}
+
+		s.store.add(jobID, outDir, videoPath)
+		log.Printf("download finished: job=%s size=%d in %s", jobID, fileInfo.Size(), time.Since(start).Round(time.Second))
+
+		if req.asJSON {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"status":             "ready",
+				"type":               "episode",
+				"job_id":             jobID,
+				"filename":           filepath.Base(videoPath),
+				"url":                "/api/file/" + jobID,
+				"size_bytes":         fileInfo.Size(),
+				"language":           resolvedLang,
+				"quality":            quality,
+				"expires_in_seconds": int(s.ttl.Seconds()),
+			})
+			return
+		}
+
+		s.serveEntry(w, r, jobID, videoPath, fileInfo, false)
+		return
+	}
+
+	// Case 2: Whole season download
+	primaryAudio := language
+	if primaryAudio == "" {
+		primaryAudio = "ja-JP"
+	}
+	primarySubs := "en-US"
+	if len(req.subs) > 0 {
+		primarySubs = req.subs[0]
+	}
+
+	seasons, err := safeGetSeasons(contentId, primaryAudio, primarySubs)
 	if err != nil {
 		_ = os.RemoveAll(outDir)
-		writeError(w, http.StatusBadGateway, "download failed: "+err.Error())
+		writeError(w, http.StatusBadGateway, "failed to fetch seasons: "+err.Error())
 		return
 	}
 
-	fileInfo, statErr := os.Stat(videoPath)
-	if statErr != nil || fileInfo.IsDir() {
+	var targetSeasons []Season
+	if req.season > 0 {
+		for _, sn := range seasons {
+			if sn.SeasonNumber == req.season {
+				targetSeasons = append(targetSeasons, sn)
+				break
+			}
+		}
+		if len(targetSeasons) == 0 {
+			_ = os.RemoveAll(outDir)
+			var available []int
+			for _, s := range seasons {
+				available = append(available, s.SeasonNumber)
+			}
+			writeError(w, http.StatusNotFound, fmt.Sprintf("season %d not found; available seasons: %v", req.season, available))
+			return
+		}
+	} else if req.season == -1 {
+		targetSeasons = seasons
+	} else {
+		targetSeasons = []Season{seasons[0]}
+	}
+
+	var allDownloadedFiles []string
+	var seriesTitle string
+	seasonNum := targetSeasons[0].SeasonNumber
+
+	for _, sn := range targetSeasons {
+		episodes, err := safeGetSeasonEpisodes(sn.ID, primaryAudio, primarySubs)
+		if err != nil {
+			log.Printf("warning: skipping season %d: %v", sn.SeasonNumber, err)
+			continue
+		}
+		if len(episodes) > 0 && seriesTitle == "" {
+			seriesTitle = episodes[0].SeriesTitle
+		}
+		files, err := downloadSeason(&quality, &audioQuality, []string{primaryAudio}, req.subs, req.cc, episodes, outDir)
+		if err != nil && len(files) == 0 {
+			log.Printf("warning: download season %d returned error: %v", sn.SeasonNumber, err)
+			continue
+		}
+		allDownloadedFiles = append(allDownloadedFiles, files...)
+	}
+
+	if len(allDownloadedFiles) == 0 {
 		_ = os.RemoveAll(outDir)
-		writeError(w, http.StatusNotFound, fmt.Sprintf("no video was produced for language %q; available audio: %s",
-			language, strings.Join(availableAudioLocales(info), ", ")))
+		writeError(w, http.StatusBadGateway, "failed to download any episodes for this season")
 		return
 	}
 
-	s.store.add(jobID, outDir, videoPath)
-	log.Printf("download finished: job=%s size=%d in %s", jobID, fileInfo.Size(), time.Since(start).Round(time.Second))
+	if seriesTitle == "" {
+		seriesTitle = "Crunchyroll Series"
+	}
+
+	var zipName string
+	if len(targetSeasons) == 1 {
+		zipName = fmt.Sprintf("%s S%02d.zip", sanitizeFilename(seriesTitle), seasonNum)
+	} else {
+		zipName = fmt.Sprintf("%s All Seasons.zip", sanitizeFilename(seriesTitle))
+	}
+	zipPath := filepath.Join(outDir, zipName)
+
+	if err := createZipArchive(zipPath, allDownloadedFiles, outDir); err != nil {
+		_ = os.RemoveAll(outDir)
+		writeError(w, http.StatusInternalServerError, "failed to create zip archive: "+err.Error())
+		return
+	}
+
+	zipFileInfo, err := os.Stat(zipPath)
+	if err != nil {
+		_ = os.RemoveAll(outDir)
+		writeError(w, http.StatusInternalServerError, "failed to stat zip archive: "+err.Error())
+		return
+	}
+
+	s.store.add(jobID, outDir, zipPath)
+	log.Printf("season download ready: job=%s episodes=%d zip=%s (%d bytes)", jobID, len(allDownloadedFiles), zipName, zipFileInfo.Size())
 
 	if req.asJSON {
+		var epList []map[string]any
+		for _, f := range allDownloadedFiles {
+			fi, _ := os.Stat(f)
+			var sz int64
+			if fi != nil {
+				sz = fi.Size()
+			}
+			epList = append(epList, map[string]any{
+				"filename":   filepath.Base(f),
+				"size_bytes": sz,
+			})
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"status":             "ready",
+			"type":               "season",
 			"job_id":             jobID,
-			"filename":           filepath.Base(videoPath),
+			"series_title":       seriesTitle,
+			"season_number":      seasonNum,
+			"episode_count":      len(allDownloadedFiles),
+			"filename":           zipName,
 			"url":                "/api/file/" + jobID,
-			"size_bytes":         fileInfo.Size(),
-			"language":           language,
-			"quality":            quality,
+			"size_bytes":         zipFileInfo.Size(),
+			"episodes":           epList,
 			"expires_in_seconds": int(s.ttl.Seconds()),
 		})
 		return
 	}
 
-	s.serveEntry(w, r, jobID, videoPath, fileInfo)
+	s.serveEntry(w, r, jobID, zipPath, zipFileInfo, false)
 }
 
 func (s *apiServer) handleFile(w http.ResponseWriter, r *http.Request) {
@@ -459,12 +833,13 @@ func (s *apiServer) handleFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "file not found or already deleted")
 		return
 	}
-	s.serveEntry(w, r, id, entry.file, fileInfo)
+	inline := r.URL.Query().Get("inline") == "1" || r.URL.Query().Get("stream") == "1"
+	s.serveEntry(w, r, id, entry.file, fileInfo, inline)
 }
 
-// serveEntry streams a downloaded MKV, supporting HTTP range requests, then
+// serveEntry streams or downloads a file, supporting HTTP range requests, then
 // restarts its expiry clock so a slow client keeps the file long enough.
-func (s *apiServer) serveEntry(w http.ResponseWriter, r *http.Request, id, path string, fileInfo os.FileInfo) {
+func (s *apiServer) serveEntry(w http.ResponseWriter, r *http.Request, id, path string, fileInfo os.FileInfo, inline bool) {
 	f, err := os.Open(path)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to open file: "+err.Error())
@@ -473,8 +848,22 @@ func (s *apiServer) serveEntry(w http.ResponseWriter, r *http.Request, id, path 
 	defer f.Close()
 
 	name := filepath.Base(path)
-	w.Header().Set("Content-Type", "video/x-matroska")
-	if disposition := mime.FormatMediaType("attachment", map[string]string{"filename": name}); disposition != "" {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".zip":
+		w.Header().Set("Content-Type", "application/zip")
+	case ".mp4":
+		w.Header().Set("Content-Type", "video/mp4")
+	case ".webm":
+		w.Header().Set("Content-Type", "video/webm")
+	default:
+		w.Header().Set("Content-Type", "video/x-matroska")
+	}
+
+	dispType := "attachment"
+	if inline {
+		dispType = "inline"
+	}
+	if disposition := mime.FormatMediaType(dispType, map[string]string{"filename": name}); disposition != "" {
 		w.Header().Set("Content-Disposition", disposition)
 	}
 	w.Header().Set("X-Job-Id", id)
@@ -483,6 +872,7 @@ func (s *apiServer) serveEntry(w http.ResponseWriter, r *http.Request, id, path 
 	http.ServeContent(w, r, name, fileInfo.ModTime(), f)
 	s.store.touch(id)
 }
+
 
 // ---------------------------------------------------------------------------
 // Search endpoint
@@ -703,10 +1093,10 @@ func availableAudioLocales(info EpisodeInfo) []string {
 }
 
 // resolveAudioLocale maps a requested locale to one the episode offers. A bare
-// code such as "en" is matched to the first available "en-*" dub; an empty
-// request falls back to the episode's primary audio locale.
+// code such as "en" is matched to the first available "en-*" dub; "hi" is matched
+// to "hi-IN"; an empty request falls back to the episode's primary audio locale.
 func resolveAudioLocale(requested string, info EpisodeInfo) string {
-	requested = strings.TrimSpace(requested)
+	requested = canonicalLocale(requested)
 	locales := availableAudioLocales(info)
 
 	if requested == "" {
@@ -732,6 +1122,143 @@ func resolveAudioLocale(requested string, info EpisodeInfo) string {
 		}
 	}
 	return requested
+}
+
+// safeGetSeasons wraps getSeasons, recovering from panics so server goroutines stay safe.
+func safeGetSeasons(contentId string, audioLocale, subLocale string) (seasons []Season, err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			err = fmt.Errorf("%v", rec)
+		}
+	}()
+	seasons = getSeasons(contentId, audioLocale, subLocale)
+	if len(seasons) == 0 {
+		return nil, fmt.Errorf("no seasons found for series %s", contentId)
+	}
+	return seasons, nil
+}
+
+// safeGetSeasonEpisodes wraps getSeasonEpisodes, recovering from panics.
+func safeGetSeasonEpisodes(seasonId string, audioLocale, subLocale string) (episodes []SeasonEpisode, err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			err = fmt.Errorf("%v", rec)
+		}
+	}()
+	episodes = getSeasonEpisodes(seasonId, audioLocale, subLocale)
+	if len(episodes) == 0 {
+		return nil, fmt.Errorf("no episodes found for season %s", seasonId)
+	}
+	return episodes, nil
+}
+
+// createZipArchive bundles files into a zip archive with zero re-compression (Store),
+// making it instantaneous for video files and compatible with standard unzip tools.
+func createZipArchive(zipPath string, files []string, baseDir string) error {
+	zipFile, err := os.Create(zipPath)
+	if err != nil {
+		return err
+	}
+	defer zipFile.Close()
+
+	zw := zip.NewWriter(zipFile)
+	defer zw.Close()
+
+	for _, file := range files {
+		relPath, err := filepath.Rel(baseDir, file)
+		if err != nil {
+			relPath = filepath.Base(file)
+		}
+		f, err := os.Open(file)
+		if err != nil {
+			return err
+		}
+		info, err := f.Stat()
+		if err != nil {
+			f.Close()
+			return err
+		}
+		header, err := zip.FileInfoHeader(info)
+		if err != nil {
+			f.Close()
+			return err
+		}
+		header.Name = filepath.ToSlash(relPath)
+		header.Method = zip.Store
+		w, err := zw.CreateHeader(header)
+		if err != nil {
+			f.Close()
+			return err
+		}
+		if _, err := io.Copy(w, f); err != nil {
+			f.Close()
+			return err
+		}
+		f.Close()
+	}
+	return nil
+}
+
+func isBareLanguage(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "hi", "hindi", "en", "english", "ja", "jp", "japanese", "es", "spanish", "fr", "french", "de", "german", "it", "italian", "pt", "portuguese", "ru", "russian", "ar", "arabic", "ta", "tamil", "te", "telugu":
+		return true
+	}
+	return false
+}
+
+var playerTemplate = template.Must(template.New("player").Parse(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{{.Title}} - Watch Online</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0e0e10; color: #efeff1; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; padding: 20px; }
+    .player-card { width: 100%; max-width: 1080px; background: #18181b; border-radius: 12px; overflow: hidden; box-shadow: 0 8px 30px rgba(0,0,0,0.7); }
+    video { width: 100%; aspect-ratio: 16/9; background: #000; display: block; }
+    .meta { padding: 20px; }
+    h1 { font-size: 1.4rem; margin-bottom: 8px; color: #ff640a; }
+    .details { font-size: 0.95rem; color: #adadb8; margin-bottom: 12px; }
+    .actions { display: flex; gap: 12px; align-items: center; font-size: 0.85rem; color: #adadb8; }
+    .btn { display: inline-block; background: #ff640a; color: #fff; padding: 8px 16px; border-radius: 6px; text-decoration: none; font-weight: 600; }
+    .btn:hover { background: #e05500; }
+    .tag { background: #26262c; padding: 4px 8px; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <div class="player-card">
+    <video controls autoplay playsinline src="{{.StreamURL}}"></video>
+    <div class="meta">
+      <h1>{{.Title}}</h1>
+      <div class="details">{{.SeriesTitle}} &bull; Season {{.SeasonNumber}} Episode {{.EpisodeNumber}} &bull; Audio: <span class="tag">{{.Language}}</span> &bull; Quality: <span class="tag">{{.Quality}}</span></div>
+      <div class="actions">
+        <a class="btn" href="{{.DownloadURL}}">Download MKV</a>
+        <span>Auto-deletes from server in {{.ExpiresMinutes}} min to free disk space</span>
+      </div>
+    </div>
+  </div>
+</body>
+</html>`))
+
+func (s *apiServer) renderPlayer(w http.ResponseWriter, r *http.Request, jobID, videoPath string, info EpisodeInfo, language, quality string) {
+	streamURL := fmt.Sprintf("/api/file/%s?inline=1", jobID)
+	downloadURL := fmt.Sprintf("/api/file/%s", jobID)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	data := map[string]any{
+		"Title":          info.Title,
+		"SeriesTitle":    info.EpisodeMetadata.SeriesTitle,
+		"SeasonNumber":   info.EpisodeMetadata.SeasonNumber,
+		"EpisodeNumber":  info.EpisodeMetadata.EpisodeNumber,
+		"Language":       language,
+		"Quality":        quality,
+		"StreamURL":      streamURL,
+		"DownloadURL":    downloadURL,
+		"ExpiresMinutes": int(s.ttl.Minutes()),
+	}
+	_ = playerTemplate.Execute(w, data)
+	s.store.touch(jobID)
 }
 
 // normalizeQuality turns "", "1080" and "1080P" into "1080p".
@@ -774,3 +1301,4 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
+

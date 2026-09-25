@@ -710,9 +710,14 @@ func downloadEpisodeWithRetry(baseContentId string, info EpisodeInfo, audioLangs
 	}
 }
 
-func downloadSeason(videoQuality, audioQuality *string, audioLangs, subsLangs, ccLangs []string, episodes []SeasonEpisode, outDir string) {
+func downloadSeason(videoQuality, audioQuality *string, audioLangs, subsLangs, ccLangs []string, episodes []SeasonEpisode, outDir string) ([]string, error) {
+	if len(episodes) == 0 {
+		return nil, fmt.Errorf("no episodes to download")
+	}
 	fmt.Printf("Downloading season %v of %s (%v episodes)\n\n", episodes[0].SeasonNumber, episodes[0].SeriesTitle, len(episodes))
 
+	var downloadedFiles []string
+	var lastErr error
 	for _, episode := range episodes {
 		info := EpisodeInfo{
 			EpisodeMetadata: EpisodeMetadata{
@@ -726,6 +731,20 @@ func downloadSeason(videoQuality, audioQuality *string, audioLangs, subsLangs, c
 			Title: episode.Title,
 		}
 
-		downloadEpisodeWithRetry(episode.ID, info, audioLangs, subsLangs, ccLangs, videoQuality, audioQuality, outDir)
+		file, err := downloadEpisodeWithRetry(episode.ID, info, audioLangs, subsLangs, ccLangs, videoQuality, audioQuality, outDir)
+		if err != nil {
+			fmt.Printf("Failed downloading episode %d (%s): %v\n", episode.EpisodeNumber, episode.Title, err)
+			lastErr = err
+			continue
+		}
+		if file != "" {
+			downloadedFiles = append(downloadedFiles, file)
+		}
 	}
+
+	if len(downloadedFiles) == 0 && lastErr != nil {
+		return nil, lastErr
+	}
+	return downloadedFiles, nil
 }
+

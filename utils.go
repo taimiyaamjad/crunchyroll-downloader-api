@@ -82,3 +82,42 @@ func sanitizeFilename(name string) string {
 	res = underscoreRuns.ReplaceAllString(res, "_")
 	return strings.TrimRight(res, " .")
 }
+
+// canonicalLocale maps short language codes like "hi" or "en" to the full
+// Crunchyroll locale string (e.g. "hi" -> "hi-IN", "en" -> "en-US").
+func canonicalLocale(code string) string {
+	s := strings.TrimSpace(code)
+	switch strings.ToLower(s) {
+	case "hi", "hindi":
+		return "hi-IN"
+	case "en", "english":
+		return "en-US"
+	case "ja", "jp", "japanese":
+		return "ja-JP"
+	case "es", "spanish":
+		return "es-419"
+	case "pt", "portuguese":
+		return "pt-BR"
+	case "fr", "french":
+		return "fr-FR"
+	case "de", "german":
+		return "de-DE"
+	case "it", "italian":
+		return "it-IT"
+	case "ru", "russian":
+		return "ru-RU"
+	case "ar", "arabic":
+		return "ar-SA"
+	case "ta", "tamil":
+		return "ta-IN"
+	case "te", "telugu":
+		return "te-IN"
+	case "ko", "korean":
+		return "ko-KR"
+	case "zh", "chinese":
+		return "zh-CN"
+	default:
+		return s
+	}
+}
+

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -15,7 +16,15 @@ func TestParseLooseDownloadQuery(t *testing.T) {
 		epURL    string
 		language string
 		quality  string
+		season   int
 	}{
+		{
+			name:     "user watch format with space",
+			raw:      "https://www.crunchyroll.com/watch/GY1234?language=hi? quality=1080p",
+			epURL:    "https://www.crunchyroll.com/watch/GY1234",
+			language: "hi",
+			quality:  "1080p",
+		},
 		{
 			name:     "terse browser form",
 			raw:      "https://www.crunchyroll.com/watch/GY1234?language(en)?1080p",
@@ -29,6 +38,22 @@ func TestParseLooseDownloadQuery(t *testing.T) {
 			epURL:    "https://www.crunchyroll.com/watch/GY1234",
 			language: "en-US",
 			quality:  "720p",
+		},
+		{
+			name:     "series whole season terse form",
+			raw:      "https://www.crunchyroll.com/series/GY9999?season=1?language=hi?1080p",
+			epURL:    "https://www.crunchyroll.com/series/GY9999",
+			language: "hi",
+			quality:  "1080p",
+			season:   1,
+		},
+		{
+			name:     "series season short token",
+			raw:      "https://www.crunchyroll.com/series/GY9999?s2?hi?720p",
+			epURL:    "https://www.crunchyroll.com/series/GY9999",
+			language: "hi",
+			quality:  "720p",
+			season:   2,
 		},
 		{
 			name:     "mixed url first then language(x)",
@@ -69,17 +94,17 @@ func TestParseLooseDownloadQuery(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			epURL, language, quality := parseLooseDownloadQuery(tt.raw)
-			if epURL != tt.epURL || language != tt.language || quality != tt.quality {
-				t.Fatalf("got (%q, %q, %q), want (%q, %q, %q)",
-					epURL, language, quality, tt.epURL, tt.language, tt.quality)
+			epURL, language, quality, season, _, _ := parseLooseDownloadQuery(tt.raw)
+			if epURL != tt.epURL || language != tt.language || quality != tt.quality || (tt.season != 0 && season != tt.season) {
+				t.Fatalf("got (%q, %q, %q, %d), want (%q, %q, %q, %d)",
+					epURL, language, quality, season, tt.epURL, tt.language, tt.quality, tt.season)
 			}
 		})
 	}
 }
 
-func TestParseDownloadRequestTerseForm(t *testing.T) {
-	req := httptest.NewRequest("GET", "/api/download?https://www.crunchyroll.com/watch/GY1234?language(en)?1080p", nil)
+func TestParseWatchRequest(t *testing.T) {
+	req := httptest.NewRequest("GET", "/api/watch?https://www.crunchyroll.com/watch/GY1234?language=hi? quality=1080p", nil)
 	got, err := parseDownloadRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -87,11 +112,45 @@ func TestParseDownloadRequestTerseForm(t *testing.T) {
 	if got.url != "https://www.crunchyroll.com/watch/GY1234" {
 		t.Errorf("url = %q", got.url)
 	}
-	if got.language != "en" {
+	if got.language != "hi" {
 		t.Errorf("language = %q", got.language)
 	}
 	if got.quality != "1080p" {
 		t.Errorf("quality = %q", got.quality)
+	}
+}
+
+func TestParseSeasonDownloadRequest(t *testing.T) {
+	req := httptest.NewRequest("GET", "/api/download?url=https://www.crunchyroll.com/series/GY1234&season=1&language=hi&quality=1080p", nil)
+	got, err := parseDownloadRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.url != "https://www.crunchyroll.com/series/GY1234" {
+		t.Errorf("url = %q", got.url)
+	}
+	if got.season != 1 {
+		t.Errorf("season = %d, want 1", got.season)
+	}
+	if got.language != "hi" {
+		t.Errorf("language = %q, want hi", got.language)
+	}
+}
+
+func TestCanonicalLocale(t *testing.T) {
+	cases := map[string]string{
+		"hi":    "hi-IN",
+		"hindi": "hi-IN",
+		"HI":    "hi-IN",
+		"en":    "en-US",
+		"ja":    "ja-JP",
+		"ja-JP": "ja-JP",
+		"hi-IN": "hi-IN",
+	}
+	for in, want := range cases {
+		if got := canonicalLocale(in); got != want {
+			t.Errorf("canonicalLocale(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 
@@ -145,7 +204,8 @@ func TestResolveAudioLocale(t *testing.T) {
 		"en":    "en-US", // bare code matched against dubs
 		"en-US": "en-US", // exact
 		"EN-us": "en-US", // case-insensitive
-		"hi":    "hi-IN",
+		"hi":    "hi-IN", // Hindi short code mapped to hi-IN
+		"hindi": "hi-IN",
 		"pt-BR": "pt-BR", // unavailable locale passes through
 	}
 	for in, want := range cases {
@@ -154,6 +214,34 @@ func TestResolveAudioLocale(t *testing.T) {
 		}
 	}
 }
+
+func TestCreateZipArchive(t *testing.T) {
+	dir := t.TempDir()
+	f1 := filepath.Join(dir, "ep1.mkv")
+	f2 := filepath.Join(dir, "ep2.mkv")
+	if err := os.WriteFile(f1, []byte("fake episode 1 video"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f2, []byte("fake episode 2 video"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+
+	zipPath := filepath.Join(dir, "season.zip")
+	if err := createZipArchive(zipPath, []string{f1, f2}, dir); err != nil {
+		t.Fatalf("createZipArchive failed: %v", err)
+	}
+
+	zr, err := zip.OpenReader(zipPath)
+	if err != nil {
+		t.Fatalf("failed to open created zip: %v", err)
+	}
+	defer zr.Close()
+
+	if len(zr.File) != 2 {
+		t.Fatalf("expected 2 files in zip, got %d", len(zr.File))
+	}
+}
+
 
 // TestTempStoreSweep checks that files are actually removed once their TTL
 // elapses, which is what frees disk space after the 10-minute window.

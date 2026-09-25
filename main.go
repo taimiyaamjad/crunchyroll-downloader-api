@@ -33,13 +33,13 @@ var (
 // left nil) whenever no delay is configured.
 var backoff *downloadBackoff
 
-// parseLangs splits a comma-separated locale list, trimming spaces and dropping
-// empties.
+// parseLangs splits a comma-separated locale list, trimming spaces, mapping
+// short codes (like "hi" or "en") to full locales, and dropping empties.
 func parseLangs(s string) []string {
 	var out []string
 	for _, p := range strings.Split(s, ",") {
 		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
+			out = append(out, canonicalLocale(p))
 		}
 	}
 	return out
@@ -101,13 +101,13 @@ func processUrl(url string) {
 			}
 
 			episodes := getSeasonEpisodes(seasonId, primaryAudio, primarySubs)
-			downloadSeason(videoQuality, audioQuality, audioLangs, subsLangs, ccLangs, episodes, "")
+			_, _ = downloadSeason(videoQuality, audioQuality, audioLangs, subsLangs, ccLangs, episodes, "")
 		} else {
 			print("No season number specified, downloading all seasons...\n")
 
 			for _, season := range seasons {
 				episodes := getSeasonEpisodes(season.ID, primaryAudio, primarySubs)
-				downloadSeason(videoQuality, audioQuality, audioLangs, subsLangs, ccLangs, episodes, "")
+				_, _ = downloadSeason(videoQuality, audioQuality, audioLangs, subsLangs, ccLangs, episodes, "")
 			}
 		}
 	}
