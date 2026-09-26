@@ -106,7 +106,8 @@ func TestParseLooseDownloadQuery(t *testing.T) {
 }
 
 func TestParseWatchRequest(t *testing.T) {
-	req := httptest.NewRequest("GET", "/api/watch?https://www.crunchyroll.com/watch/GY1234?language=hi? quality=1080p", nil)
+	// A raw space is not a valid HTTP request target; browsers encode it as %20.
+	req := httptest.NewRequest("GET", "/api/watch?https://www.crunchyroll.com/watch/GY1234?language=hi?%20quality=1080p", nil)
 	got, err := parseDownloadRequest(req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

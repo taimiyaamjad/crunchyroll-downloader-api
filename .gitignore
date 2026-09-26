@@ -14,3 +14,7 @@ private_key.pem
 
 # PocketDev harness data
 .pocketdev/
+
+# Temporary Go toolchain / scratch build dirs
+.gotmp/
+.buildcheck/
