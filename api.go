@@ -259,6 +259,7 @@ type apiServer struct {
 	root      string
 	ttl       time.Duration
 	watchIdle time.Duration
+	ticketTTL time.Duration
 	jobs      chan struct{} // concurrency gate for downloads
 	start     time.Time
 	auth      *apiAuth // nil when -no-auth was given
@@ -292,6 +293,7 @@ func runServer() {
 		root:      root,
 		ttl:       *cleanupAfter,
 		watchIdle: *watchIdleTimeout,
+		ticketTTL: *ticketTTL,
 		jobs:      make(chan struct{}, limit),
 		start:     time.Now(),
 	}
@@ -304,17 +306,24 @@ func runServer() {
 		if err != nil {
 			log.Fatalf("failed to set up API token: %v", err)
 		}
-		srv.auth = &apiAuth{token: info.token}
+		srv.auth = newAPIAuth(info.token, *signKey, splitOrigins(*allowOrigin))
 		switch {
 		case info.explicit:
 			log.Printf("API token: using the value passed with -api-token")
-		case info.builtin:
-			log.Printf("API token: using the permanent default token and saved it to %s", info.path)
+		case info.generated:
+			log.Printf("API token: generated a new random token and saved it to %s", info.path)
 		default:
 			log.Printf("loaded permanent API token from %s", info.path)
 		}
-		log.Printf("API token: %s", info.token)
-		log.Printf("send it as: Authorization: Bearer <token>  |  X-API-Key: <token>  |  ?token=<token>")
+		if *showToken {
+			log.Printf("API token (full): %s", info.token)
+		} else {
+			log.Printf("API token: %s  (masked; pass -show-token or read %s to see it)", maskToken(info.token), info.path)
+		}
+		log.Printf("browsers must NOT use the master token: mint short-lived signed URLs with GET /api/ticket (ttl %s)", *ticketTTL)
+		if len(srv.auth.origins) > 0 {
+			log.Printf("origin allowlist: %s", strings.Join(srv.auth.origins, ", "))
+		}
 	}
 
 	stop := make(chan struct{})
@@ -326,6 +335,7 @@ func runServer() {
 	mux.HandleFunc("/api/search", srv.handleSearch)
 	mux.HandleFunc("/api/download", srv.handleDownload)
 	mux.HandleFunc("/api/watch", srv.handleWatch)
+	mux.HandleFunc("/api/ticket", srv.handleTicket)
 	mux.HandleFunc("/api/file/", srv.handleFile)
 
 	var handler http.Handler = mux
@@ -338,6 +348,9 @@ func runServer() {
 		root, srv.ttl, srv.watchIdle, limit)
 	if getToken() == "" {
 		log.Printf("no -etp-rt given: each request must pass etp_rt=... until a token is set")
+	}
+	if srv.auth.enabled() && !isLoopbackAddr(*listenAddr) && len(srv.auth.origins) == 0 {
+		log.Printf("WARNING: %s is reachable beyond localhost and no -allow-origin is set; anyone who obtains the token or a signed URL can use this API", *listenAddr)
 	}
 
 	httpSrv := &http.Server{
@@ -367,24 +380,29 @@ func (s *apiServer) handleIndex(w http.ResponseWriter, r *http.Request) {
 		"service": "crunchyroll-downloader-api",
 		"auth":    s.authDescription(),
 		"endpoints": []string{
+			"GET /api/ticket?path=/api/watch&url=<episode_url>&language=hi&quality=1080p  (master token; mints a short-lived signed URL)",
 			"GET /api/search?q=<query>&limit=10",
-			"GET /api/watch?url=<episode_url>&language=hi&quality=1080p",
-			"GET /api/download?url=<episode_or_series_url>&language=hi&quality=1080p",
+			"GET /api/watch?url=<episode_url>&language=hi&quality=1080p[&exp=..&sig=..]",
+			"GET /api/download?url=<episode_or_series_url>&language=hi&quality=1080p[&exp=..&sig=..]",
 			"GET /api/file/<job_id>",
 			"GET /api/health",
 		},
 		"examples": []string{
-			"/api/watch?url=https://www.crunchyroll.com/watch/GYXXXXXX&language=hi&quality=1080p",
+			"/api/ticket?path=/api/watch&url=https://www.crunchyroll.com/watch/GYXXXXXX&language=hi&quality=1080p&ttl=5m",
+			"/api/watch?url=https://www.crunchyroll.com/watch/GYXXXXXX&language=hi&quality=1080p&exp=1730000000&sig=<signature>",
 			"/api/watch?https://www.crunchyroll.com/watch/GYXXXXXX?language=hi? quality=1080p",
 			"/api/watch?url=https://www.crunchyroll.com/watch/GYXXXXXX&language=hi&player=1",
 			"/api/download?url=https://www.crunchyroll.com/watch/GYXXXXXX&language=hi&quality=1080p",
 			"/api/download?url=https://www.crunchyroll.com/series/GYXXXXXX&season=1&language=hi&quality=1080p",
 			"/api/download?https://www.crunchyroll.com/watch/GYXXXXXX?language(hi)?1080p",
 			"/api/download?url=https://www.crunchyroll.com/watch/GYXXXXXX&language=hi&format=json",
-			"/api/watch?url=https://www.crunchyroll.com/watch/GYXXXXXX&language=hi&quality=1080p&token=<api_token>",
 		},
 		"cleanup": fmt.Sprintf("downloads are deleted %s after they finish; /api/watch streams are deleted %s after the last viewer stops watching", s.ttl, s.watchIdle),
 		"notes": []string{
+			"the master API token is server-to-server only; never put it in frontend JavaScript or a public URL.",
+			"for browser playback, call /api/ticket with the master token to mint a short-lived signed URL, then give that URL to the browser.",
+			"signed URLs carry exp+sig instead of the token and expire after the ticket TTL (default 5m).",
+			"set -allow-origin to restrict browser requests to your platform's domains.",
 			"for Hindi use 'hi' as the short code (automatically maps to hi-IN).",
 			"GET /api/watch streams the video directly online in Chrome (inline playback with range requests). Append &player=1 for a built-in web player page.",
 			"GET /api/watch files are deleted automatically once nobody has streamed them for the watch idle timeout (default 2m); an in-progress stream is never deleted.",
@@ -404,7 +422,92 @@ func (s *apiServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"tracked_files":      s.store.count(),
 		"cleanup_seconds":    int(s.ttl.Seconds()),
 		"watch_idle_seconds": int(s.watchIdle.Seconds()),
+		"ticket_ttl_seconds": int(s.ticketTTL.Seconds()),
 	})
+}
+
+// ticketSignablePath limits which endpoints /api/ticket is allowed to sign, so
+// a ticket can never be minted for the ticket endpoint itself or an arbitrary
+// path.
+func ticketSignablePath(p string) bool {
+	switch p {
+	case "/api/watch", "/api/download", "/api/search":
+		return true
+	}
+	return strings.HasPrefix(p, "/api/file/")
+}
+
+// handleTicket mints a short-lived signed URL. It is the bridge that lets a
+// public site stream through this API without ever exposing the master token:
+// the platform's backend calls /api/ticket with the master token, and the
+// browser only receives the resulting exp+sig URL.
+func (s *apiServer) handleTicket(w http.ResponseWriter, r *http.Request) {
+	if !s.auth.enabled() {
+		writeError(w, http.StatusBadRequest,
+			"API token authentication is disabled, so signed URLs are not available; use -api-token or remove -no-auth")
+		return
+	}
+
+	target := strings.TrimSpace(firstNonEmpty(r.URL.Query().Get("path"), r.URL.Query().Get("endpoint")))
+	if target == "" {
+		target = "/api/watch"
+	}
+	if !ticketSignablePath(target) {
+		writeError(w, http.StatusBadRequest,
+			"path must be one of /api/watch, /api/download, /api/search or /api/file/<job_id>")
+		return
+	}
+
+	// Forward the caller's parameters, minus the ticket controls and minus any
+	// credential. The signed URL is handed to a browser, so it must never carry
+	// the master token or the Crunchyroll etp_rt cookie.
+	params := url.Values{}
+	for key, vals := range r.URL.Query() {
+		switch strings.ToLower(key) {
+		case "path", "endpoint", "ttl", "absolute",
+			"token", "api_key", "apikey", "key", "sig", "exp",
+			"etp_rt", "etp-rt":
+			continue
+		}
+		for _, v := range vals {
+			params.Add(key, v)
+		}
+	}
+
+	ttl := s.ticketTTL
+	if v := strings.TrimSpace(r.URL.Query().Get("ttl")); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			writeError(w, http.StatusBadRequest, "ttl must be a positive duration such as 5m or 30s")
+			return
+		}
+		ttl = d
+	}
+
+	signedPath, exp := s.auth.signQuery(http.MethodGet, target, params.Encode(), ttl)
+	resp := map[string]any{
+		"url":                signedPath,
+		"expires_in_seconds": int(time.Until(time.Unix(exp, 0)).Seconds()),
+		"expires_at":         time.Unix(exp, 0).UTC().Format(time.RFC3339),
+		"note":               "hand this URL to the browser; it expires and never contains the master API token",
+	}
+	if v := strings.TrimSpace(r.URL.Query().Get("absolute")); v == "1" || strings.EqualFold(v, "true") {
+		resp["absolute_url"] = absoluteURL(r, signedPath)
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// absoluteURL rebuilds the externally visible URL for a request, honouring a
+// reverse proxy's X-Forwarded-Proto.
+func absoluteURL(r *http.Request, path string) string {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	if proto := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")); proto != "" {
+		scheme = strings.ToLower(proto)
+	}
+	return scheme + "://" + r.Host + path
 }
 
 // ---------------------------------------------------------------------------

@@ -747,4 +747,3 @@ func downloadSeason(videoQuality, audioQuality *string, audioLangs, subsLangs, c
 	}
 	return downloadedFiles, nil
 }
-

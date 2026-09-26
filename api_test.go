@@ -2,10 +2,13 @@ package main
 
 import (
 	"archive/zip"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -414,27 +417,31 @@ func TestTempStoreSweepInterval(t *testing.T) {
 // API token authentication
 // ---------------------------------------------------------------------------
 
-// TestLoadOrCreateAPITokenDefault verifies the permanent, documented token is
-// used and persisted on the first run, then reloaded unchanged afterwards.
-func TestLoadOrCreateAPITokenDefault(t *testing.T) {
+// TestLoadOrCreateAPITokenGenerated verifies that a fresh random token is
+// generated on first run (never a hard-coded public default) and then reloaded
+// unchanged, so it stays permanent across restarts.
+func TestLoadOrCreateAPITokenGenerated(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "api_token")
 
 	info, err := loadOrCreateAPIToken("", path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.token != defaultAPIToken {
-		t.Fatalf("token = %q, want built-in %q", info.token, defaultAPIToken)
+	if !info.generated {
+		t.Fatal("first run should report a generated token")
 	}
-	if !info.builtin {
-		t.Fatal("first run should report the built-in token")
+	if !strings.HasPrefix(info.token, apiTokenPrefix) {
+		t.Fatalf("token = %q, want %q prefix", info.token, apiTokenPrefix)
+	}
+	if len(info.token) < 40 {
+		t.Fatalf("generated token is too short to be secure: %q", info.token)
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("token file was not written: %v", err)
 	}
-	if strings.TrimSpace(string(b)) != defaultAPIToken {
-		t.Fatalf("token file = %q, want %q", strings.TrimSpace(string(b)), defaultAPIToken)
+	if strings.TrimSpace(string(b)) != info.token {
+		t.Fatalf("token file = %q, want %q", strings.TrimSpace(string(b)), info.token)
 	}
 
 	// A restart must load the exact same permanent token from disk.
@@ -442,11 +449,20 @@ func TestLoadOrCreateAPITokenDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if again.token != defaultAPIToken {
-		t.Fatalf("reloaded token = %q, want %q", again.token, defaultAPIToken)
+	if again.token != info.token {
+		t.Fatalf("reloaded token = %q, want %q", again.token, info.token)
 	}
-	if again.builtin || again.explicit {
+	if again.generated || again.explicit {
 		t.Fatalf("reloaded token should come from the file, got %+v", again)
+	}
+
+	// Two fresh installs must not share a token.
+	other, err := loadOrCreateAPIToken("", filepath.Join(t.TempDir(), "api_token"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other.token == info.token {
+		t.Fatal("independent installs must not generate the same token")
 	}
 }
 
@@ -630,5 +646,239 @@ func TestAuthDisabledAllowsEverything(t *testing.T) {
 	handler.ServeHTTP(rec, httptest.NewRequest("GET", "/api/download?url=x", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("disabled auth: status = %d, want 200", rec.Code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Signed URLs, browser sessions and the origin allowlist
+// ---------------------------------------------------------------------------
+
+// TestMaskToken makes sure secrets never reach the logs in full.
+func TestMaskToken(t *testing.T) {
+	token := "crdl_zenova_4f9c2a7e8b1d6035"
+	masked := maskToken(token)
+	if masked == token {
+		t.Fatal("masked token must differ from the real token")
+	}
+	if strings.Contains(masked, "4f9c2a7e8b1d6035") {
+		t.Fatalf("masked token still leaks the secret: %q", masked)
+	}
+	if maskToken("") != "" || maskToken("short") == "short" {
+		t.Fatal("masking should hide empty and short tokens")
+	}
+}
+
+// TestSignAndVerifySignature proves a minted signed URL verifies, and that
+// tampering with any part of it fails.
+func TestSignAndVerifySignature(t *testing.T) {
+	auth := newAPIAuth("crdl_secret", "", nil)
+
+	signed, exp := auth.signQuery("GET", "/api/watch", "url=https%3A%2F%2Fx%2Fwatch%2FGY1&language=hi", 5*time.Minute)
+	if exp <= time.Now().Unix() {
+		t.Fatal("signed URL should not already be expired")
+	}
+	req := httptest.NewRequest("GET", signed, nil)
+	gotExp, ok := auth.verifySignature(req)
+	if !ok || gotExp != exp {
+		t.Fatalf("valid signature rejected: ok=%v exp=%d want %d", ok, gotExp, exp)
+	}
+
+	// A different signing key must not validate the same URL.
+	other := newAPIAuth("crdl_other", "", nil)
+	if _, ok := other.verifySignature(httptest.NewRequest("GET", signed, nil)); ok {
+		t.Fatal("a signature from another key must not verify")
+	}
+
+	// Tampering with the query invalidates the signature.
+	tampered := strings.Replace(signed, "language=hi", "language=en", 1)
+	if _, ok := auth.verifySignature(httptest.NewRequest("GET", tampered, nil)); ok {
+		t.Fatal("tampered query must not verify")
+	}
+
+	// Tampering with the path invalidates the signature.
+	if _, ok := auth.verifySignature(httptest.NewRequest("GET", strings.Replace(signed, "/api/watch", "/api/download", 1), nil)); ok {
+		t.Fatal("tampered path must not verify")
+	}
+
+	// Expired signatures are rejected.
+	expiredExp := time.Now().Add(-time.Minute).Unix()
+	expiredQuery := url.Values{}
+	expiredQuery.Set("url", "x")
+	expiredQuery.Set("exp", strconv.FormatInt(expiredExp, 10))
+	expiredQuery.Set("sig", auth.signature("GET", "/api/watch", canonicalQuery("url=x"), expiredExp))
+	expired := "/api/watch?" + expiredQuery.Encode()
+	if _, ok := auth.verifySignature(httptest.NewRequest("GET", expired, nil)); ok {
+		t.Fatal("expired signature must not verify")
+	}
+}
+
+// TestRequireAuthAcceptsSignedURL checks the middleware lets a signed URL
+// through and sets a short-lived session cookie for follow-up requests.
+func TestRequireAuthAcceptsSignedURL(t *testing.T) {
+	auth := newAPIAuth("crdl_secret", "", nil)
+	handler := auth.requireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	signed, _ := auth.signQuery("GET", "/api/watch", "url=x&language=hi", time.Minute)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest("GET", signed, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("signed URL: status = %d, want 200", rec.Code)
+	}
+
+	var session string
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == apiSessionCookie {
+			session = c.Value
+		}
+	}
+	if session == "" {
+		t.Fatalf("signed URL should set the %s cookie", apiSessionCookie)
+	}
+
+	// The session cookie alone authorizes a follow-up /api/file request.
+	req := httptest.NewRequest("GET", "/api/file/abc?inline=1", nil)
+	req.AddCookie(&http.Cookie{Name: apiSessionCookie, Value: session})
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("session cookie: status = %d, want 200", rec.Code)
+	}
+
+	// A bogus session cookie is rejected.
+	req = httptest.NewRequest("GET", "/api/file/abc", nil)
+	req.AddCookie(&http.Cookie{Name: apiSessionCookie, Value: "nope"})
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("bogus session: status = %d, want 401", rec.Code)
+	}
+}
+
+// TestTicketCannotEscalate proves a signed URL cannot mint more tickets.
+func TestTicketCannotEscalate(t *testing.T) {
+	auth := newAPIAuth("crdl_secret", "", nil)
+	handler := auth.requireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	signed, _ := auth.signQuery("GET", "/api/ticket", "path=/api/watch&url=x", time.Minute)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest("GET", signed, nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("signed ticket request: status = %d, want 401", rec.Code)
+	}
+
+	// The master token still works for /api/ticket.
+	req := httptest.NewRequest("GET", "/api/ticket?path=/api/watch&url=x", nil)
+	req.Header.Set("Authorization", "Bearer crdl_secret")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("master token ticket request: status = %d, want 200", rec.Code)
+	}
+}
+
+// TestOriginAllowlist checks that only configured browser origins pass.
+func TestOriginAllowlist(t *testing.T) {
+	auth := newAPIAuth("crdl_secret", "", []string{"https://myanime.example"})
+	handler := auth.requireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// Server-to-server (no Origin/Referer) is allowed.
+	req := httptest.NewRequest("GET", "/api/search?q=x", nil)
+	req.Header.Set("Authorization", "Bearer crdl_secret")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("server-to-server: status = %d, want 200", rec.Code)
+	}
+
+	// An allowed origin is accepted.
+	req = httptest.NewRequest("GET", "/api/search?q=x", nil)
+	req.Header.Set("Authorization", "Bearer crdl_secret")
+	req.Header.Set("Origin", "https://myanime.example")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("allowed origin: status = %d, want 200", rec.Code)
+	}
+
+	// A foreign origin is rejected even with a valid signed URL, so a leaked
+	// URL cannot be hotlinked from another site.
+	signed, _ := auth.signQuery("GET", "/api/watch", "url=x", time.Minute)
+	req = httptest.NewRequest("GET", signed, nil)
+	req.Header.Set("Origin", "https://evil.example")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("foreign origin: status = %d, want 403", rec.Code)
+	}
+
+	// Referer is used when Origin is absent.
+	req = httptest.NewRequest("GET", "/api/search?q=x", nil)
+	req.Header.Set("Authorization", "Bearer crdl_secret")
+	req.Header.Set("Referer", "https://evil.example/page")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("foreign referer: status = %d, want 403", rec.Code)
+	}
+}
+
+// TestHandleTicketStripsCredentials proves the minted URL never carries the
+// master token or the Crunchyroll etp_rt cookie.
+func TestHandleTicketStripsCredentials(t *testing.T) {
+	auth := newAPIAuth("crdl_secret", "", nil)
+	srv := &apiServer{auth: auth, ticketTTL: 5 * time.Minute}
+
+	req := httptest.NewRequest("GET",
+		"/api/ticket?path=/api/watch&url=https%3A%2F%2Fx%2Fwatch%2FGY1&language=hi&token=crdl_secret&etp_rt=SECRET",
+		nil)
+	rec := httptest.NewRecorder()
+	srv.handleTicket(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("ticket status = %d body = %s", rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(payload.URL, "crdl_secret") || strings.Contains(payload.URL, "SECRET") {
+		t.Fatalf("ticket URL leaked a credential: %s", payload.URL)
+	}
+	if !strings.Contains(payload.URL, "sig=") || !strings.Contains(payload.URL, "exp=") {
+		t.Fatalf("ticket URL is missing signature params: %s", payload.URL)
+	}
+
+	// The minted URL must actually verify.
+	if _, ok := auth.verifySignature(httptest.NewRequest("GET", payload.URL, nil)); !ok {
+		t.Fatalf("minted ticket did not verify: %s", payload.URL)
+	}
+
+	// A disallowed path is refused.
+	rec = httptest.NewRecorder()
+	srv.handleTicket(rec, httptest.NewRequest("GET", "/api/ticket?path=/api/ticket", nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("ticket for /api/ticket: status = %d, want 400", rec.Code)
+	}
+}
+
+// TestIsLoopbackAddr covers the reachability warning helper.
+func TestIsLoopbackAddr(t *testing.T) {
+	for _, addr := range []string{"127.0.0.1:8080", "localhost:8080", "[::1]:8080"} {
+		if !isLoopbackAddr(addr) {
+			t.Errorf("%s should be loopback", addr)
+		}
+	}
+	for _, addr := range []string{":8080", "0.0.0.0:8080", "192.168.1.10:8080"} {
+		if isLoopbackAddr(addr) {
+			t.Errorf("%s should not be loopback", addr)
+		}
 	}
 }

@@ -28,9 +28,13 @@ var (
 	watchIdleTimeout = flag.Duration("watch-idle-timeout", 2*time.Minute, "Delete a streamed /api/watch video after this long with no active viewer (in-progress streams are never deleted)")
 	maxJobs          = flag.Int("max-jobs", 2, "Maximum number of concurrent API downloads")
 
-	apiToken     = flag.String("api-token", "", "Permanent API token required by /api/* endpoints. If empty, a token is generated once and saved to -api-token-file")
+	apiToken     = flag.String("api-token", "", "Permanent API token required by /api/* endpoints. If empty, a random token is generated once and saved to -api-token-file")
 	apiTokenFile = flag.String("api-token-file", "", "Where the permanent API token is stored (default: <user config dir>/crunchyroll-downloader/api_token)")
 	noAuth       = flag.Bool("no-auth", false, "Disable API token authentication (not recommended; anyone who can reach the server can use it)")
+	showToken    = flag.Bool("show-token", false, "Print the full API token on startup (otherwise it is masked in the logs)")
+	signKey      = flag.String("sign-key", "", "Secret used to sign short-lived /api/ticket URLs. Defaults to a key derived from the API token")
+	allowOrigin  = flag.String("allow-origin", "", "Comma-separated browser origins allowed to call the API (e.g. \"https://myanime.example\"). Empty = any origin")
+	ticketTTL    = flag.Duration("ticket-ttl", defaultTicketTTL, "Lifetime of signed URLs minted by /api/ticket (browsers); max 24h")
 )
 
 // backoff spaces out consecutive episode downloads by *downloadDelay. It is

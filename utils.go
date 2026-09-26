@@ -120,4 +120,3 @@ func canonicalLocale(code string) string {
 		return s
 	}
 }
-

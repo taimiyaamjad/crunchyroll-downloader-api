@@ -279,19 +279,12 @@ Start the server:
 ./crunchyroll-downloader -serve -addr :8080 -etp-rt replace_this
 ```
 
-### API token (permanent, required)
+### API Authentication & Browser Security
 
-Every `/api/*` endpoint is protected by a **permanent API token**. The server
-uses a built-in token on the first run and saves it to disk, so it stays the
-same across restarts and you can hand it to a browser, a script or an AI agent.
+Every `/api/*` endpoint is protected. The server generates a secure random
+permanent API token on its first run and stores it on disk, so it survives restarts.
 
-The permanent token is:
-
-```text
-crdl_zenova_4f9c2a7e8b1d6035
-```
-
-The server prints it on startup and stores it at:
+The server stores the token at:
 
 | OS | Location |
 | --- | --- |
@@ -299,31 +292,41 @@ The server prints it on startup and stores it at:
 | macOS | `~/Library/Application Support/crunchyroll-downloader/api_token` |
 | Windows | `%AppData%\crunchyroll-downloader\api_token` |
 
-Send the token with **any** of these three methods:
+#### 1. Server-to-Server / Backend (Master Token)
+
+For backend scripts, AI agents, and server-side callers, provide the master token:
 
 | Method | Example |
 | --- | --- |
-| `Authorization` header (best for scripts/AI) | `Authorization: Bearer crdl_zenova_4f9c2a7e8b1d6035` |
-| `X-API-Key` header | `X-API-Key: crdl_zenova_4f9c2a7e8b1d6035` |
-| `?token=` query parameter (best for Chrome) | `...&token=crdl_zenova_4f9c2a7e8b1d6035` |
+| `Authorization` header (recommended) | `Authorization: Bearer <your_token>` |
+| `X-API-Key` header | `X-API-Key: <your_token>` |
+| `?token=` query parameter | `...&token=<your_token>` |
 
-When you pass the token in the URL, the server also sets a cookie, so Chrome's
-video player and page reloads keep working without repeating it.
+To specify your own token, pass `-api-token <token>`. By default the token is masked in startup logs; pass `-show-token` to display it in plaintext.
 
-**Change it** to your own secret with `-api-token`, or point at a different
-file with `-api-token-file`:
+#### 2. Browser Playback (Short-lived Signed URLs via `/api/ticket`)
 
-```shell
-./crunchyroll-downloader -serve -addr :8080 -etp-rt replace_this -api-token crdl_my_own_secret
-```
+> **Security rule:** Never expose the master API token to client-side JavaScript or public links.
 
-Disable authentication entirely with `-no-auth` (only do this on a trusted,
-local machine). `GET /` and `GET /api/health` are always public and never
-contain the token.
+To safely stream in a browser without revealing your master token:
+1. Your backend requests a signed ticket from the server using the master token:
+   ```shell
+   curl -H "Authorization: Bearer <token>" \
+     "http://localhost:8080/api/ticket?path=/api/watch&url=https://www.crunchyroll.com/watch/GE00198973JAJP&language=hi"
+   ```
+2. The server returns a short-lived signed URL (default 5-minute validity):
+   ```json
+   {
+     "url": "/api/watch?url=https://www.crunchyroll.com/watch/GE00198973JAJP&language=hi&exp=1730000000&sig=abcdef...",
+     "expires_in_seconds": 300,
+     "expires_at": "2026-09-26T06:37:00Z"
+   }
+   ```
+3. Hand this signed URL to the browser `<video>` tag or iframe. When the browser accesses it, a short-lived session cookie is issued for seamless scrubbing and chunk requests.
 
-> **Security note:** `crdl_zenova_4f9c2a7e8b1d6035` is public because it is
-> printed here. It is fine while the server listens on `localhost`, but if you
-> expose it to the internet, set your own with `-api-token`.
+#### 3. Origin Allowlist (`-allow-origin`)
+
+Restrict browser requests to your domain (e.g. `-allow-origin "https://myanime.example"`). Any browser request with an untrusted `Origin` or `Referer` header will be rejected with `403 Forbidden`.
 
 ### 1. Watch Online Directly in Chrome (`/api/watch`)
 
@@ -370,6 +373,7 @@ http://localhost:8080/api/download?https://www.crunchyroll.com/series/GJ0H7Q5ZJ?
 | --- | --- |
 | `GET /` | JSON index of available endpoints and examples |
 | `GET /api/health` | Uptime, active jobs and number of tracked files |
+| `GET /api/ticket?...` | Mint a short-lived signed URL for browser streaming (`/api/watch`) or download |
 | `GET /api/search?q=<title>&limit=10` | Search Crunchyroll series, seasons and episodes with ready-to-use URLs |
 | `GET /api/watch?...` | Directly stream an episode online in Chrome (inline video or web player with `&player=1`) |
 | `GET /api/download?...` | Download single episode (MKV) or whole season (ZIP) |
@@ -388,7 +392,8 @@ http://localhost:8080/api/download?https://www.crunchyroll.com/series/GJ0H7Q5ZJ?
 | `subs` / `cc` | `-subs-lang` / `-cc-lang` values | Comma-separated subtitle / caption locales |
 | `etp_rt` | server account | Override the account for this one request |
 | `format=json` | stream / file | Return JSON descriptor with file link instead of the media body |
-| `token` | — | **API token** (see [API token](#api-token-permanent-required)). Required unless sent as a header. |
+| `token` | — | Master API token (server-to-server). |
+| `exp` + `sig` | — | Expiration timestamp and HMAC signature for signed URLs (browser playback). |
 
 ### Server flags
 
@@ -399,27 +404,31 @@ http://localhost:8080/api/download?https://www.crunchyroll.com/series/GJ0H7Q5ZJ?
 -cleanup-after 10m     Delete each download this long after it finishes
 -watch-idle-timeout 2m Delete a /api/watch stream this long after the last viewer stops
 -max-jobs 2            Maximum concurrent downloads
--api-token <token>     Use this permanent API token instead of the built-in one
+-api-token <token>     Master API token. If empty, a random token is generated and saved
 -api-token-file <path> Where the permanent API token is stored
+-show-token            Print the full API token on startup (masked by default)
+-sign-key <key>        Secret used to sign short-lived /api/ticket URLs (derived from token if unset)
+-ticket-ttl 5m         Lifetime of signed URLs minted by /api/ticket (default 5m)
+-allow-origin <origin> Comma-separated browser origins allowed (e.g. "https://myanime.example")
 -no-auth               Disable API token authentication (not recommended)
 ```
 
 ### Using the API from scripts & AI agents
 
-Send the token in the `Authorization` header (or `X-API-Key`). These examples
-use the permanent token `crdl_zenova_4f9c2a7e8b1d6035`.
+Send the token in the `Authorization` header (or `X-API-Key`). Replace
+`<token>` with the token from `-api-token` or your saved token file.
 
 **Search for a series:**
 
 ```shell
-curl -H "Authorization: Bearer crdl_zenova_4f9c2a7e8b1d6035" \
+curl -H "Authorization: Bearer <token>" \
   "http://localhost:8080/api/search?q=hells%20paradise&limit=5"
 ```
 
 **Stream an episode (opens the video inline):**
 
 ```shell
-curl -H "X-API-Key: crdl_zenova_4f9c2a7e8b1d6035" \
+curl -H "X-API-Key: <token>" \
   "http://localhost:8080/api/watch?url=https://www.crunchyroll.com/watch/GE00198973JAJP&language=hi&quality=1080p" \
   --output episode.mkv
 ```
@@ -427,7 +436,7 @@ curl -H "X-API-Key: crdl_zenova_4f9c2a7e8b1d6035" \
 **Download a whole season as a ZIP:**
 
 ```shell
-curl -H "Authorization: Bearer crdl_zenova_4f9c2a7e8b1d6035" \
+curl -H "Authorization: Bearer <token>" \
   "http://localhost:8080/api/download?url=https://www.crunchyroll.com/series/GJ0H7Q5ZJ&season=1&language=hi&quality=1080p" \
   --output season-1.zip
 ```
@@ -437,7 +446,7 @@ curl -H "Authorization: Bearer crdl_zenova_4f9c2a7e8b1d6035" \
 ```python
 import requests
 
-TOKEN = "crdl_zenova_4f9c2a7e8b1d6035"
+TOKEN = "your_api_token_here"
 BASE = "http://localhost:8080"
 headers = {"Authorization": f"Bearer {TOKEN}"}
 
