@@ -26,8 +26,8 @@ video straight to your browser.
 - Parallel segment downloads (10 workers) for faster downloads
 - Retry with backoff on connection errors
 - Batch download from a list of URLs
-- **HTTP API** with search and on-demand download that streams the video to the browser
-- **Automatic cleanup** — API downloads are deleted 10 minutes after they finish, so disk space is freed without any manual work
+- **HTTP API** with search and on-demand download that streams the video to the browser, protected by a **permanent API token**
+- **Automatic cleanup** — API downloads are deleted 10 minutes after they finish, and `/api/watch` streams are deleted 2 minutes after the last viewer stops watching, so disk space is freed without any manual work
 
 ## Requirements
 
@@ -269,8 +269,9 @@ If Crunchyroll rate-limits an episode anyway, it's retried in place (starting at
 Instead of the one-shot CLI, run a small HTTP API that searches Crunchyroll,
 **streams anime directly online in your browser** (`/api/watch`), and downloads
 single episodes or entire seasons (`/api/download`). Downloads are written to a
-temporary directory and **deleted 10 minutes after they finish**, so you don't
-have to clean up space by hand.
+temporary directory and **deleted 10 minutes after they finish**, while
+`/api/watch` streams are **deleted 2 minutes after the last viewer stops
+watching**, so you don't have to clean up space by hand.
 
 Start the server:
 
@@ -278,42 +279,89 @@ Start the server:
 ./crunchyroll-downloader -serve -addr :8080 -etp-rt replace_this
 ```
 
+### API token (permanent, required)
+
+Every `/api/*` endpoint is protected by a **permanent API token**. The server
+uses a built-in token on the first run and saves it to disk, so it stays the
+same across restarts and you can hand it to a browser, a script or an AI agent.
+
+The permanent token is:
+
+```text
+crdl_zenova_4f9c2a7e8b1d6035
+```
+
+The server prints it on startup and stores it at:
+
+| OS | Location |
+| --- | --- |
+| Linux | `~/.config/crunchyroll-downloader/api_token` |
+| macOS | `~/Library/Application Support/crunchyroll-downloader/api_token` |
+| Windows | `%AppData%\crunchyroll-downloader\api_token` |
+
+Send the token with **any** of these three methods:
+
+| Method | Example |
+| --- | --- |
+| `Authorization` header (best for scripts/AI) | `Authorization: Bearer crdl_zenova_4f9c2a7e8b1d6035` |
+| `X-API-Key` header | `X-API-Key: crdl_zenova_4f9c2a7e8b1d6035` |
+| `?token=` query parameter (best for Chrome) | `...&token=crdl_zenova_4f9c2a7e8b1d6035` |
+
+When you pass the token in the URL, the server also sets a cookie, so Chrome's
+video player and page reloads keep working without repeating it.
+
+**Change it** to your own secret with `-api-token`, or point at a different
+file with `-api-token-file`:
+
+```shell
+./crunchyroll-downloader -serve -addr :8080 -etp-rt replace_this -api-token crdl_my_own_secret
+```
+
+Disable authentication entirely with `-no-auth` (only do this on a trusted,
+local machine). `GET /` and `GET /api/health` are always public and never
+contain the token.
+
+> **Security note:** `crdl_zenova_4f9c2a7e8b1d6035` is public because it is
+> printed here. It is fine while the server listens on `localhost`, but if you
+> expose it to the internet, set your own with `-api-token`.
+
 ### 1. Watch Online Directly in Chrome (`/api/watch`)
 
 To stream an anime online directly in your browser:
 
 ```text
-http://localhost:8080/api/watch?https://www.crunchyroll.com/watch/GE00198973JAJP?language=hi? quality=1080p
+http://localhost:8080/api/watch?https://www.crunchyroll.com/watch/GE00198973JAJP?language=hi? quality=1080p&token=crdl_zenova_4f9c2a7e8b1d6035
 ```
 
 Or using standard parameters:
 
 ```text
-http://localhost:8080/api/watch?url=https://www.crunchyroll.com/watch/GE00198973JAJP&language=hi&quality=1080p
+http://localhost:8080/api/watch?url=https://www.crunchyroll.com/watch/GE00198973JAJP&language=hi&quality=1080p&token=crdl_zenova_4f9c2a7e8b1d6035
 ```
 
 - **Hindi Dubs**: Use **`hi`** as the short code (automatically maps to `hi-IN`).
 - **Inline Streaming**: Streams video with `Content-Disposition: inline` and HTTP range support so you can seek instantly.
 - **Web Player**: Add `&player=1` to watch in a responsive HTML5 video player with episode title, series metadata, and download link.
+- **Auto-delete when idle**: Once nobody has been streaming an episode for **2 minutes**, its temporary file is deleted to free disk space. A stream that is still open is never deleted mid-playback; the 2-minute countdown only starts after the last viewer disconnects.
 
 ### 2. Download Whole Season or Single Episode (`/api/download`)
 
 To download a single episode:
 
 ```text
-http://localhost:8080/api/download?url=https://www.crunchyroll.com/watch/GE00198973JAJP&language=hi&quality=1080p
+http://localhost:8080/api/download?url=https://www.crunchyroll.com/watch/GE00198973JAJP&language=hi&quality=1080p&token=crdl_zenova_4f9c2a7e8b1d6035
 ```
 
 To download an **entire season** (served as a single `.zip` file containing all episodes):
 
 ```text
-http://localhost:8080/api/download?url=https://www.crunchyroll.com/series/GJ0H7Q5ZJ/hells-paradise&season=1&language=hi&quality=1080p
+http://localhost:8080/api/download?url=https://www.crunchyroll.com/series/GJ0H7Q5ZJ/hells-paradise&season=1&language=hi&quality=1080p&token=crdl_zenova_4f9c2a7e8b1d6035
 ```
 
 Or in terse format:
 
 ```text
-http://localhost:8080/api/download?https://www.crunchyroll.com/series/GJ0H7Q5ZJ?season=1?language(hi)?1080p
+http://localhost:8080/api/download?https://www.crunchyroll.com/series/GJ0H7Q5ZJ?season=1?language(hi)?1080p&token=crdl_zenova_4f9c2a7e8b1d6035
 ```
 
 ### Endpoints
@@ -340,6 +388,7 @@ http://localhost:8080/api/download?https://www.crunchyroll.com/series/GJ0H7Q5ZJ?
 | `subs` / `cc` | `-subs-lang` / `-cc-lang` values | Comma-separated subtitle / caption locales |
 | `etp_rt` | server account | Override the account for this one request |
 | `format=json` | stream / file | Return JSON descriptor with file link instead of the media body |
+| `token` | — | **API token** (see [API token](#api-token-permanent-required)). Required unless sent as a header. |
 
 ### Server flags
 
@@ -348,9 +397,82 @@ http://localhost:8080/api/download?https://www.crunchyroll.com/series/GJ0H7Q5ZJ?
 -addr :8080            Address to listen on
 -api-dir <path>        Directory for API downloads (default: <system temp>/crdl-api)
 -cleanup-after 10m     Delete each download this long after it finishes
+-watch-idle-timeout 2m Delete a /api/watch stream this long after the last viewer stops
 -max-jobs 2            Maximum concurrent downloads
+-api-token <token>     Use this permanent API token instead of the built-in one
+-api-token-file <path> Where the permanent API token is stored
+-no-auth               Disable API token authentication (not recommended)
 ```
 
+### Using the API from scripts & AI agents
+
+Send the token in the `Authorization` header (or `X-API-Key`). These examples
+use the permanent token `crdl_zenova_4f9c2a7e8b1d6035`.
+
+**Search for a series:**
+
+```shell
+curl -H "Authorization: Bearer crdl_zenova_4f9c2a7e8b1d6035" \
+  "http://localhost:8080/api/search?q=hells%20paradise&limit=5"
+```
+
+**Stream an episode (opens the video inline):**
+
+```shell
+curl -H "X-API-Key: crdl_zenova_4f9c2a7e8b1d6035" \
+  "http://localhost:8080/api/watch?url=https://www.crunchyroll.com/watch/GE00198973JAJP&language=hi&quality=1080p" \
+  --output episode.mkv
+```
+
+**Download a whole season as a ZIP:**
+
+```shell
+curl -H "Authorization: Bearer crdl_zenova_4f9c2a7e8b1d6035" \
+  "http://localhost:8080/api/download?url=https://www.crunchyroll.com/series/GJ0H7Q5ZJ&season=1&language=hi&quality=1080p" \
+  --output season-1.zip
+```
+
+**Python (works for AI tools and scripts):**
+
+```python
+import requests
+
+TOKEN = "crdl_zenova_4f9c2a7e8b1d6035"
+BASE = "http://localhost:8080"
+headers = {"Authorization": f"Bearer {TOKEN}"}
+
+# Search
+results = requests.get(f"{BASE}/api/search", params={"q": "hells paradise"}, headers=headers).json()
+print(results)
+
+# Download one episode
+url = f"{BASE}/api/download"
+params = {
+    "url": "https://www.crunchyroll.com/watch/GE00198973JAJP",
+    "language": "hi",       # Hindi short code
+    "quality": "1080p",
+}
+with requests.get(url, params=params, headers=headers, stream=True) as r:
+    r.raise_for_status()
+    with open("episode.mkv", "wb") as f:
+        for chunk in r.iter_content(chunk_size=1 << 20):
+            f.write(chunk)
+```
+
+**JavaScript / Node:**
+
+```javascript
+const TOKEN = "crdl_zenova_4f9c2a7e8b1d6035";
+const res = await fetch(
+  "http://localhost:8080/api/download?url=https://www.crunchyroll.com/watch/GE00198973JAJP&language=hi&quality=1080p",
+  { headers: { Authorization: `Bearer ${TOKEN}` } }
+);
+const buf = Buffer.from(await res.arrayBuffer());
+require("fs").writeFileSync("episode.mkv", buf);
+```
+
+Every protected endpoint answers `401 Unauthorized` with a short JSON error
+when the token is missing or wrong, so an agent can detect it easily.
 
 If no `-etp-rt` is given at startup, clients must pass `etp_rt=...` on each
 request (or the server returns `401`). The token is refreshed automatically
@@ -368,6 +490,15 @@ Every API download goes into its own temporary folder and is given an expiry tim
 fetch the file. Files still being streamed are kept alive until the transfer
 ends, and `/api/file/<job_id>` stops working once the file has been deleted.
 Change the window with, for example, `-cleanup-after 30m`.
+
+`/api/watch` streams use a separate, shorter rule: they are deleted once **no
+one has been actively streaming them for `-watch-idle-timeout`** (default
+**2 minutes**). While a viewer is connected the file is pinned, no matter how
+long the episode is; the countdown only begins after the last stream closes.
+This means a paused or abandoned tab frees its disk space automatically. The
+sweeper checks more often when the idle window is short, so deletion happens
+close to the promised time. Tune it with `-watch-idle-timeout 90s` (or `0` to
+disable idle deletion and fall back to the normal `-cleanup-after` window).
 
 ## Building
 
@@ -412,8 +543,17 @@ On Windows you can also drop `ffmpeg.exe` in the same folder as the downloader.
 
 ### The API returns `401`
 
-No valid token was found. Pass `-etp-rt <cookie>` when starting the server, or add
-`&etp_rt=<cookie>` to the request URL.
+There are two different `401`s:
+
+1. **`missing or invalid API token`** — the request didn't carry the API token.
+   Add `Authorization: Bearer crdl_zenova_4f9c2a7e8b1d6035`,
+   `X-API-Key: crdl_zenova_4f9c2a7e8b1d6035`, or `&token=crdl_zenova_4f9c2a7e8b1d6035`
+   to the URL. Check the token the server printed on startup (or your own
+   `-api-token` value).
+2. **`no Crunchyroll credentials`** — the API token was fine, but the server has
+   no Crunchyroll account. Pass `-etp-rt <cookie>` when starting the server, or
+   add `&etp_rt=<cookie>` to the request URL. See
+   [How do I get my `etp_rt` cookie?](#how-do-i-get-my-etp_rt-cookie).
 
 ## License
 

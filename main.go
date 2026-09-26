@@ -21,11 +21,16 @@ var (
 	debug         = flag.Bool("debug-manifest", false, "Log raw episode playback JSON and manifest XML")
 	downloadDelay = flag.Duration("download-delay", 0, "Minimum delay between episode downloads, to help avoid Crunchyroll's rate limiting (e.g. \"30s\", \"2m\")")
 
-	serveMode    = flag.Bool("serve", false, "Run the HTTP API server (search + download) instead of the one-shot CLI")
-	listenAddr   = flag.String("addr", ":8080", "Address the HTTP API server listens on (used with -serve)")
-	apiDir       = flag.String("api-dir", "", "Directory for API downloads (default: <system temp>/crdl-api)")
-	cleanupAfter = flag.Duration("cleanup-after", 10*time.Minute, "Delete each API download this long after it finishes, to free disk space")
-	maxJobs      = flag.Int("max-jobs", 2, "Maximum number of concurrent API downloads")
+	serveMode        = flag.Bool("serve", false, "Run the HTTP API server (search + download) instead of the one-shot CLI")
+	listenAddr       = flag.String("addr", ":8080", "Address the HTTP API server listens on (used with -serve)")
+	apiDir           = flag.String("api-dir", "", "Directory for API downloads (default: <system temp>/crdl-api)")
+	cleanupAfter     = flag.Duration("cleanup-after", 10*time.Minute, "Delete each API download this long after it finishes, to free disk space")
+	watchIdleTimeout = flag.Duration("watch-idle-timeout", 2*time.Minute, "Delete a streamed /api/watch video after this long with no active viewer (in-progress streams are never deleted)")
+	maxJobs          = flag.Int("max-jobs", 2, "Maximum number of concurrent API downloads")
+
+	apiToken     = flag.String("api-token", "", "Permanent API token required by /api/* endpoints. If empty, a token is generated once and saved to -api-token-file")
+	apiTokenFile = flag.String("api-token-file", "", "Where the permanent API token is stored (default: <user config dir>/crunchyroll-downloader/api_token)")
+	noAuth       = flag.Bool("no-auth", false, "Disable API token authentication (not recommended; anyone who can reach the server can use it)")
 )
 
 // backoff spaces out consecutive episode downloads by *downloadDelay. It is

@@ -27,38 +27,84 @@ import (
 // Every video the API produces is registered here with an expiry. A background
 // sweeper deletes the whole job directory once it expires, so downloads do not
 // accumulate on disk even if the client never comes back for the file.
+//
+// Two lifetimes are supported:
+//   - downloads: deleted a fixed TTL after they finish (default 10 minutes)
+//   - watch streams: deleted once no one has been actively streaming for the
+//     watch idle timeout (default 2 minutes), and never while a stream is open
 // ---------------------------------------------------------------------------
 
 type tempEntry struct {
-	dir       string
-	file      string
-	cacheKey  string
-	expiresAt time.Time
+	dir          string
+	file         string
+	cacheKey     string
+	kind         string        // "download" or "watch"
+	expiresAt    time.Time     // absolute expiry, used by download entries
+	idleTimeout  time.Duration // >0 for watch entries: delete after this much inactivity
+	lastActivity time.Time     // last time the entry was streamed or touched
+	active       int           // number of streams currently reading the file
 }
 
 type tempStore struct {
-	mu      sync.Mutex
-	entries map[string]*tempEntry
-	ttl     time.Duration
+	mu        sync.Mutex
+	entries   map[string]*tempEntry
+	ttl       time.Duration
+	watchIdle time.Duration
 }
 
-func newTempStore(ttl time.Duration) *tempStore {
-	return &tempStore{entries: map[string]*tempEntry{}, ttl: ttl}
+func newTempStore(ttl, watchIdle time.Duration) *tempStore {
+	return &tempStore{entries: map[string]*tempEntry{}, ttl: ttl, watchIdle: watchIdle}
 }
 
 // add registers a freshly downloaded file, starting its expiry clock.
 func (s *tempStore) add(id, dir, file string) {
-	s.addWithKey(id, dir, file, "")
+	s.addEntry(id, dir, file, "", "download")
 }
 
 // addWithKey registers a freshly downloaded file with an optional cache key.
 func (s *tempStore) addWithKey(id, dir, file, cacheKey string) {
+	s.addEntry(id, dir, file, cacheKey, "download")
+}
+
+// addWatch registers an online-stream entry. Unlike a download, a watch entry
+// is deleted once nobody has been streaming it for the watch idle timeout,
+// rather than a fixed time after the download finished.
+func (s *tempStore) addWatch(id, dir, file, cacheKey string) {
+	s.addEntry(id, dir, file, cacheKey, "watch")
+}
+
+func (s *tempStore) addEntry(id, dir, file, cacheKey, kind string) {
+	now := time.Now()
+	e := &tempEntry{
+		dir:          dir,
+		file:         file,
+		cacheKey:     cacheKey,
+		kind:         kind,
+		expiresAt:    now.Add(s.ttl),
+		lastActivity: now,
+	}
+	if kind == "watch" && s.watchIdle > 0 {
+		e.idleTimeout = s.watchIdle
+	}
 	s.mu.Lock()
-	s.entries[id] = &tempEntry{dir: dir, file: file, cacheKey: cacheKey, expiresAt: time.Now().Add(s.ttl)}
+	s.entries[id] = e
 	s.mu.Unlock()
 }
 
-// findByKey searches for an unexpired entry with a matching cacheKey.
+// expired reports whether an entry should be deleted. A stream that is being
+// read right now is never expired; a watch entry dies after the idle timeout,
+// and a download after its absolute TTL. Callers must hold s.mu.
+func (s *tempStore) expired(e *tempEntry, now time.Time) bool {
+	if e.active > 0 {
+		return false
+	}
+	if e.idleTimeout > 0 {
+		return now.Sub(e.lastActivity) > e.idleTimeout
+	}
+	return now.After(e.expiresAt)
+}
+
+// findByKey searches for a live entry with a matching cacheKey.
 func (s *tempStore) findByKey(key string) (string, *tempEntry, bool) {
 	if key == "" {
 		return "", nil, false
@@ -67,21 +113,60 @@ func (s *tempStore) findByKey(key string) (string, *tempEntry, bool) {
 	defer s.mu.Unlock()
 	now := time.Now()
 	for id, e := range s.entries {
-		if e.cacheKey == key && now.Before(e.expiresAt) {
+		if e.cacheKey == key && !s.expired(e, now) {
 			return id, e, true
 		}
 	}
 	return "", nil, false
 }
 
-// touch restarts the expiry clock, used while a file is being streamed so a
-// slow client cannot have the file deleted out from under it.
+// touch restarts an entry's countdown: the idle clock for watch entries and the
+// expiry clock for downloads.
 func (s *tempStore) touch(id string) {
 	s.mu.Lock()
 	if e, ok := s.entries[id]; ok {
-		e.expiresAt = time.Now().Add(s.ttl)
+		now := time.Now()
+		e.lastActivity = now
+		e.expiresAt = now.Add(s.ttl)
 	}
 	s.mu.Unlock()
+}
+
+// acquire marks an entry as actively being streamed so the sweeper cannot
+// delete it mid-stream, and refreshes its activity clock.
+func (s *tempStore) acquire(id string) {
+	s.mu.Lock()
+	if e, ok := s.entries[id]; ok {
+		e.active++
+		e.lastActivity = time.Now()
+	}
+	s.mu.Unlock()
+}
+
+// release marks one stream as finished and restarts the countdown, so the file
+// survives briefly for seeks/reconnects before the idle sweeper removes it.
+func (s *tempStore) release(id string) {
+	s.mu.Lock()
+	if e, ok := s.entries[id]; ok {
+		if e.active > 0 {
+			e.active--
+		}
+		now := time.Now()
+		e.lastActivity = now
+		e.expiresAt = now.Add(s.ttl)
+	}
+	s.mu.Unlock()
+}
+
+// expiresIn reports the lifetime hint for an entry: the idle timeout for watch
+// streams, otherwise the standard download TTL.
+func (s *tempStore) expiresIn(id string, fallback time.Duration) time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e, ok := s.entries[id]; ok && e.idleTimeout > 0 {
+		return e.idleTimeout
+	}
+	return fallback
 }
 
 // get returns a live entry, reporting false once it has expired.
@@ -89,7 +174,7 @@ func (s *tempStore) get(id string) (*tempEntry, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e, ok := s.entries[id]
-	if !ok || time.Now().After(e.expiresAt) {
+	if !ok || s.expired(e, time.Now()) {
 		return nil, false
 	}
 	return e, true
@@ -112,7 +197,7 @@ func (s *tempStore) sweep() {
 	s.mu.Lock()
 	var expired []*tempEntry
 	for id, e := range s.entries {
-		if now.After(e.expiresAt) {
+		if s.expired(e, now) {
 			expired = append(expired, e)
 			delete(s.entries, id)
 		}
@@ -120,14 +205,33 @@ func (s *tempStore) sweep() {
 	s.mu.Unlock()
 
 	for _, e := range expired {
-		log.Printf("cleanup: deleting expired download %s", e.dir)
+		reason := "ttl"
+		if e.idleTimeout > 0 {
+			reason = "idle"
+		}
+		log.Printf("cleanup: deleting %s %s (%s)", e.kind, e.dir, reason)
 		_ = os.RemoveAll(e.dir)
 	}
 }
 
+// sweepInterval picks how often to look for dead entries. With a short watch
+// idle timeout the sweeper runs more often so deletion happens close to the
+// promised window instead of up to 30s late.
+func (s *tempStore) sweepInterval() time.Duration {
+	const def = 30 * time.Second
+	if s.watchIdle <= 0 || s.watchIdle >= def {
+		return def
+	}
+	interval := s.watchIdle / 2
+	if interval < time.Second {
+		interval = time.Second
+	}
+	return interval
+}
+
 // run sweeps expired downloads until stop is closed.
 func (s *tempStore) run(stop <-chan struct{}) {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(s.sweepInterval())
 	defer ticker.Stop()
 	for {
 		select {
@@ -151,11 +255,13 @@ func (s *tempStore) count() int {
 // ---------------------------------------------------------------------------
 
 type apiServer struct {
-	store *tempStore
-	root  string
-	ttl   time.Duration
-	jobs  chan struct{} // concurrency gate for downloads
-	start time.Time
+	store     *tempStore
+	root      string
+	ttl       time.Duration
+	watchIdle time.Duration
+	jobs      chan struct{} // concurrency gate for downloads
+	start     time.Time
+	auth      *apiAuth // nil when -no-auth was given
 }
 
 func runServer() {
@@ -182,11 +288,33 @@ func runServer() {
 		limit = 1
 	}
 	srv := &apiServer{
-		store: newTempStore(*cleanupAfter),
-		root:  root,
-		ttl:   *cleanupAfter,
-		jobs:  make(chan struct{}, limit),
-		start: time.Now(),
+		store:     newTempStore(*cleanupAfter, *watchIdleTimeout),
+		root:      root,
+		ttl:       *cleanupAfter,
+		watchIdle: *watchIdleTimeout,
+		jobs:      make(chan struct{}, limit),
+		start:     time.Now(),
+	}
+
+	// Set up the permanent API token that protects every /api/* endpoint.
+	if *noAuth {
+		log.Printf("WARNING: API token authentication is DISABLED (-no-auth)")
+	} else {
+		info, err := loadOrCreateAPIToken(*apiToken, *apiTokenFile)
+		if err != nil {
+			log.Fatalf("failed to set up API token: %v", err)
+		}
+		srv.auth = &apiAuth{token: info.token}
+		switch {
+		case info.explicit:
+			log.Printf("API token: using the value passed with -api-token")
+		case info.builtin:
+			log.Printf("API token: using the permanent default token and saved it to %s", info.path)
+		default:
+			log.Printf("loaded permanent API token from %s", info.path)
+		}
+		log.Printf("API token: %s", info.token)
+		log.Printf("send it as: Authorization: Bearer <token>  |  X-API-Key: <token>  |  ?token=<token>")
 	}
 
 	stop := make(chan struct{})
@@ -200,15 +328,21 @@ func runServer() {
 	mux.HandleFunc("/api/watch", srv.handleWatch)
 	mux.HandleFunc("/api/file/", srv.handleFile)
 
+	var handler http.Handler = mux
+	if srv.auth != nil {
+		handler = srv.auth.requireAuth(mux)
+	}
+
 	log.Printf("Crunchyroll API listening on %s", *listenAddr)
-	log.Printf("downloads: %s | auto-delete after %s | max concurrent jobs: %d", root, srv.ttl, limit)
+	log.Printf("downloads: %s | auto-delete downloads after %s | watch idle timeout %s | max concurrent jobs: %d",
+		root, srv.ttl, srv.watchIdle, limit)
 	if getToken() == "" {
 		log.Printf("no -etp-rt given: each request must pass etp_rt=... until a token is set")
 	}
 
 	httpSrv := &http.Server{
 		Addr:              *listenAddr,
-		Handler:           withLogging(mux),
+		Handler:           withLogging(handler),
 		ReadHeaderTimeout: 15 * time.Second,
 	}
 	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -231,6 +365,7 @@ func (s *apiServer) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"service": "crunchyroll-downloader-api",
+		"auth":    s.authDescription(),
 		"endpoints": []string{
 			"GET /api/search?q=<query>&limit=10",
 			"GET /api/watch?url=<episode_url>&language=hi&quality=1080p",
@@ -246,11 +381,13 @@ func (s *apiServer) handleIndex(w http.ResponseWriter, r *http.Request) {
 			"/api/download?url=https://www.crunchyroll.com/series/GYXXXXXX&season=1&language=hi&quality=1080p",
 			"/api/download?https://www.crunchyroll.com/watch/GYXXXXXX?language(hi)?1080p",
 			"/api/download?url=https://www.crunchyroll.com/watch/GYXXXXXX&language=hi&format=json",
+			"/api/watch?url=https://www.crunchyroll.com/watch/GYXXXXXX&language=hi&quality=1080p&token=<api_token>",
 		},
-		"cleanup": fmt.Sprintf("downloaded videos are deleted %s after the download finishes", s.ttl),
+		"cleanup": fmt.Sprintf("downloads are deleted %s after they finish; /api/watch streams are deleted %s after the last viewer stops watching", s.ttl, s.watchIdle),
 		"notes": []string{
 			"for Hindi use 'hi' as the short code (automatically maps to hi-IN).",
 			"GET /api/watch streams the video directly online in Chrome (inline playback with range requests). Append &player=1 for a built-in web player page.",
+			"GET /api/watch files are deleted automatically once nobody has streamed them for the watch idle timeout (default 2m); an in-progress stream is never deleted.",
 			"GET /api/download downloads a single episode (.mkv) or an entire season (.zip when given a /series/ URL or season=N).",
 			"quality is a video height such as 1080p, 720p, 480p or 360p. audio_quality defaults to 192k.",
 			"format=json returns a JSON descriptor with /api/file/<job_id> instead of streaming the video body.",
@@ -259,14 +396,14 @@ func (s *apiServer) handleIndex(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-
 func (s *apiServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":          "ok",
-		"uptime_seconds":  int(time.Since(s.start).Seconds()),
-		"active_jobs":     len(s.jobs),
-		"tracked_files":   s.store.count(),
-		"cleanup_seconds": int(s.ttl.Seconds()),
+		"status":             "ok",
+		"uptime_seconds":     int(time.Since(s.start).Seconds()),
+		"active_jobs":        len(s.jobs),
+		"tracked_files":      s.store.count(),
+		"cleanup_seconds":    int(s.ttl.Seconds()),
+		"watch_idle_seconds": int(s.watchIdle.Seconds()),
 	})
 }
 
@@ -580,7 +717,7 @@ func (s *apiServer) handleWatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.store.addWithKey(jobID, outDir, videoPath, cacheKey)
+	s.store.addWatch(jobID, outDir, videoPath, cacheKey)
 
 	if req.player {
 		s.renderPlayer(w, r, jobID, videoPath, info, language, quality)
@@ -824,7 +961,9 @@ func (s *apiServer) handleFile(w http.ResponseWriter, r *http.Request) {
 	}
 	entry, ok := s.store.get(id)
 	if !ok {
-		writeError(w, http.StatusNotFound, fmt.Sprintf("file not found or already deleted (files are removed %s after download)", s.ttl))
+		writeError(w, http.StatusNotFound, fmt.Sprintf(
+			"file not found or already deleted (downloads last %s; watch streams last %s after the last viewer stops)",
+			s.ttl, s.watchIdle))
 		return
 	}
 	fileInfo, err := os.Stat(entry.file)
@@ -837,8 +976,10 @@ func (s *apiServer) handleFile(w http.ResponseWriter, r *http.Request) {
 	s.serveEntry(w, r, id, entry.file, fileInfo, inline)
 }
 
-// serveEntry streams or downloads a file, supporting HTTP range requests, then
-// restarts its expiry clock so a slow client keeps the file long enough.
+// serveEntry streams or downloads a file, supporting HTTP range requests. While
+// the body is being written the entry is marked active so the idle sweeper
+// cannot delete a file out from under an in-progress stream; when it finishes
+// the countdown restarts.
 func (s *apiServer) serveEntry(w http.ResponseWriter, r *http.Request, id, path string, fileInfo os.FileInfo, inline bool) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -846,6 +987,11 @@ func (s *apiServer) serveEntry(w http.ResponseWriter, r *http.Request, id, path 
 		return
 	}
 	defer f.Close()
+
+	if id != "" {
+		s.store.acquire(id)
+		defer s.store.release(id)
+	}
 
 	name := filepath.Base(path)
 	switch strings.ToLower(filepath.Ext(name)) {
@@ -867,12 +1013,10 @@ func (s *apiServer) serveEntry(w http.ResponseWriter, r *http.Request, id, path 
 		w.Header().Set("Content-Disposition", disposition)
 	}
 	w.Header().Set("X-Job-Id", id)
-	w.Header().Set("X-Expires-In", strconv.Itoa(int(s.ttl.Seconds())))
+	w.Header().Set("X-Expires-In", strconv.Itoa(int(s.store.expiresIn(id, s.ttl).Seconds())))
 
 	http.ServeContent(w, r, name, fileInfo.ModTime(), f)
-	s.store.touch(id)
 }
-
 
 // ---------------------------------------------------------------------------
 // Search endpoint
@@ -1235,7 +1379,7 @@ var playerTemplate = template.Must(template.New("player").Parse(`<!DOCTYPE html>
       <div class="details">{{.SeriesTitle}} &bull; Season {{.SeasonNumber}} Episode {{.EpisodeNumber}} &bull; Audio: <span class="tag">{{.Language}}</span> &bull; Quality: <span class="tag">{{.Quality}}</span></div>
       <div class="actions">
         <a class="btn" href="{{.DownloadURL}}">Download MKV</a>
-        <span>Auto-deletes from server in {{.ExpiresMinutes}} min to free disk space</span>
+        <span>Auto-deletes from server after {{.IdleTimeout}} with no active viewer</span>
       </div>
     </div>
   </div>
@@ -1247,18 +1391,32 @@ func (s *apiServer) renderPlayer(w http.ResponseWriter, r *http.Request, jobID, 
 	downloadURL := fmt.Sprintf("/api/file/%s", jobID)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	data := map[string]any{
-		"Title":          info.Title,
-		"SeriesTitle":    info.EpisodeMetadata.SeriesTitle,
-		"SeasonNumber":   info.EpisodeMetadata.SeasonNumber,
-		"EpisodeNumber":  info.EpisodeMetadata.EpisodeNumber,
-		"Language":       language,
-		"Quality":        quality,
-		"StreamURL":      streamURL,
-		"DownloadURL":    downloadURL,
-		"ExpiresMinutes": int(s.ttl.Minutes()),
+		"Title":         info.Title,
+		"SeriesTitle":   info.EpisodeMetadata.SeriesTitle,
+		"SeasonNumber":  info.EpisodeMetadata.SeasonNumber,
+		"EpisodeNumber": info.EpisodeMetadata.EpisodeNumber,
+		"Language":      language,
+		"Quality":       quality,
+		"StreamURL":     streamURL,
+		"DownloadURL":   downloadURL,
+		"IdleTimeout":   humanDuration(s.watchIdle),
 	}
 	_ = playerTemplate.Execute(w, data)
 	s.store.touch(jobID)
+}
+
+// humanDuration renders a duration for humans, e.g. 2m, 90s, 1m30s.
+func humanDuration(d time.Duration) string {
+	switch {
+	case d <= 0:
+		return "0s"
+	case d%time.Minute == 0:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	default:
+		return d.String()
+	}
 }
 
 // normalizeQuality turns "", "1080" and "1080P" into "1080p".
@@ -1301,4 +1459,3 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
-
